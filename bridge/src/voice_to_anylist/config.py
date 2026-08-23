@@ -91,7 +91,8 @@ class Settings(BaseSettings):
         if missing:
             raise SystemExit(
                 f"Missing required configuration: {', '.join(missing)}.\n"
-                "Run `voice-to-anylist bootstrap` to obtain a Google master token."
+                f"Set them in {default_state_dir() / '.env'}.\n"
+                "Run `vta bootstrap` to obtain a Google master token."
             )
 
 

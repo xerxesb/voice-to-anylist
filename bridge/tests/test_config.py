@@ -37,8 +37,12 @@ def test_require_credentials_still_exits_naming_what_is_missing():
     with pytest.raises(SystemExit) as raised:
         settings.require_credentials()
 
-    assert "GOOGLE_EMAIL" in str(raised.value)
-    assert "GOOGLE_MASTER_TOKEN" in str(raised.value)
+    message = str(raised.value)
+    assert "GOOGLE_EMAIL" in message
+    assert "GOOGLE_MASTER_TOKEN" in message
+    # It should name the file to edit and the command that fills it in.
+    assert ".env" in message
+    assert "vta bootstrap" in message
 
 
 def test_require_credentials_passes_when_configured():

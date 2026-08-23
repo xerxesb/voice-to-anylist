@@ -41,23 +41,27 @@ ticking an item off in the AnyList app clears it from the note.
 - **Failure.** A single blip is ignored; a run of them alerts. A mass deletion
   is not propagated until it has been seen twice, so an API returning nothing
   is never read as "the user cleared their list".
+- **Not being set up yet.** A host with no credentials stays up and says so on
+  its health endpoint, rather than restart-looping and looking broken.
 
 ## Getting started
 
-> **Not yet deployed.** Start with
-> **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — it records what is verified,
-> what is not (the Docker image has never been built), and the four small
-> changes outstanding before first run.
-
-See **[docs/SETUP.md](docs/SETUP.md)** for the detail. The Keep note has to be
-created and shared before anything else matters.
+It runs natively on a Mac, as two launchd user agents. No Docker, no
+Homebrew, no sudo — it pins and unpacks its own Python and Node under your
+home directory.
 
 ```bash
-cp .env.example .env          # fill in credentials
-docker compose up -d
-docker compose exec voice-to-anylist voice-to-anylist doctor
-docker compose exec voice-to-anylist voice-to-anylist sync --dry-run
+git clone -b claude/anylist-voice-assistant-j3419q \
+  https://github.com/xerxesb/voice-to-anylist ~/srv/voice-to-anylist
+~/srv/voice-to-anylist/deploy/macos/install.sh
 ```
+
+Then work through **[docs/SETUP.md](docs/SETUP.md)**. The Keep note has to be
+created and shared before anything else matters, and `vta sync --dry-run` is
+worth reading before you let it write.
+
+**[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** covers the host layout, how to
+update, and what to do when something breaks.
 
 ## Layout
 
@@ -67,24 +71,25 @@ docker compose exec voice-to-anylist voice-to-anylist sync --dry-run
 | `bridge/src/voice_to_anylist/engine.py` | Three-way merge and the safety guard |
 | `bridge/src/voice_to_anylist/normalise.py` | Quantity parsing and item identity |
 | `anylist-api/` | Loopback-only Node facade over the `anylist` package |
-| `docs/SETUP.md` | Setup, operation, and what to do when it breaks |
+| `deploy/macos/` | `install.sh`, the two launchd agents, and the `vta` shim |
 
 Two languages because the best-maintained client for each service is in a
-different one: `gkeepapi` for Keep, `anylist` for AnyList. They run in one
-container and talk over loopback, so the AnyList facade never binds a public
-interface.
+different one: `gkeepapi` for Keep, `anylist` for AnyList. They talk over
+loopback, so the AnyList facade never binds a public interface.
 
 ## Development
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -e 'bridge[dev]'
-(cd anylist-api && npm install)
-cd bridge && ../.venv/bin/python -m pytest
+python3 -m venv .venv && .venv/bin/pip install -e 'bridge[dev]'
+npm install --prefix anylist-api
+(cd bridge && ../.venv/bin/python -m pytest)
 ```
 
 The suite needs no credentials and touches no network. The engine is tested
 against in-memory fakes, and the Python/Node seam against the real Express
-server running on a stubbed AnyList.
+server running on a stubbed AnyList. Those seam tests skip without `node` and
+an installed `anylist-api` — except under `CI`, where they fail instead, since
+quietly not testing the seam defeats the point of having a test for it.
 
 ## Caveats
 

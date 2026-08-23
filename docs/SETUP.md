@@ -3,6 +3,9 @@
 Roughly half an hour, most of it in Google's UI rather than here. Work through
 it in order: the Keep note has to exist before anything else will do anything.
 
+If you have not installed it yet, start with
+[DEPLOYMENT.md](DEPLOYMENT.md#installing).
+
 ## 1. The Keep note (the part that will bite you)
 
 Google's speakers do not talk to third parties any more. What they still do is
@@ -30,8 +33,9 @@ Two things worth knowing before you debug a missing item:
   name. If it hears a name that does not exist it will happily create a second
   one, and the bridge will not be watching it.
 
-Verify before continuing: say *"Hey Google, add test item to the shopping
-list"* and confirm it appears in the Keep note.
+**Verify before continuing.** Say *"Hey Google, add test item to the shopping
+list"* and confirm it appears in the Keep note. If it does not, nothing
+downstream will work.
 
 ## 2. The Google master token
 
@@ -40,81 +44,98 @@ Workspace-only — so the bridge authenticates the way a phone does, with a
 master token.
 
 ```bash
-voice-to-anylist bootstrap
+vta bootstrap
 ```
 
-Follow the prompts. It sends you to Google's embedded-setup page, you copy one
-cookie value back, and it prints the token.
+It sends you to Google's embedded-setup page, you copy one cookie value back,
+and it prints the token.
 
 The token behaves like a logged-in device: it lasts indefinitely, but is
 revoked when the account password changes or the device is removed from the
-account. That is the single most likely reason this will stop working in a
-year, which is why `ALERT_WEBHOOK_URL` is worth setting.
+account. It also grants access to **every** note in that account's Keep — its
+scope cannot be narrowed. Treat it as a password.
+
+That expiry is the single most likely reason this stops working in a year,
+which is why `ALERT_WEBHOOK_URL` in step 3 is worth setting.
 
 ## 3. Configuration
 
+Everything lives in one file, outside the checkout:
+
 ```bash
-cp .env.example .env
+$EDITOR ~/Library/Application\ Support/voice-to-anylist/.env
 ```
 
-Fill in the Google values from step 2, your AnyList login, and the name of the
-AnyList list to mirror (`ANYLIST_LIST`, default `Grocery`).
+Fill in the two Google values from step 2, your AnyList login, and the name of
+the AnyList list to mirror. Set `ALERT_WEBHOOK_URL` to an
+[ntfy.sh](https://ntfy.sh) topic while you are there — the master token dying
+is the expected long-run failure, and the symptom (items quietly not arriving)
+otherwise goes unnoticed for a week.
+
+Then pick the new settings up:
+
+```bash
+vta restart
+```
 
 ## 4. Check it before you let it write
 
 ```bash
-docker compose up -d
-docker compose exec voice-to-anylist voice-to-anylist doctor
+vta doctor
 ```
 
-`doctor` checks each side separately, so a failure names its own cause: which
-list it found, how many items are on it, or exactly which credential was
-rejected.
+`doctor` checks each side separately, so a failure names its own cause. It
+prints **every list on your AnyList account**, quoted, with the configured one
+marked:
 
-Then rehearse a real cycle without writing anything:
+```
+  ok    AnyList: 3 list(s) on the account
+             'Costco'
+          -> 'Grocery'
+             'Hardware'
+  ok    AnyList list 'Grocery': 12 items
+  ok    Keep note 'Shopping list': 4 items (1 ticked)
+```
+
+Copy the spelling from there rather than guessing it. Pointing at the wrong
+list is the mistake most likely to make the next step propose deletions.
+
+## 5. Rehearse
 
 ```bash
-docker compose exec voice-to-anylist voice-to-anylist sync --dry-run
+vta sync --dry-run
 ```
 
-It prints every change it *would* make. Read that list. If it proposes
-deleting things you wanted to keep, stop and work out why before continuing —
-most often the wrong `ANYLIST_LIST`.
+It prints every change it *would* make and writes nothing. **Read that list.**
+If it proposes deleting things you wanted to keep, stop and work out why before
+continuing — most often the wrong `ANYLIST_LIST`.
 
-When it looks right, set `DRY_RUN=false` and restart.
+## 6. Go live
 
-## 5. Deploying to Fly.io
+The service is already running; it just has not been given anything to do yet.
+Confirm both sides are healthy and let it work:
 
 ```bash
-fly launch --no-deploy
-fly volumes create state --size 1
-fly secrets set \
-  GOOGLE_EMAIL="you@gmail.com" \
-  GOOGLE_MASTER_TOKEN="aas_et/..." \
-  ANYLIST_EMAIL="you@example.com" \
-  ANYLIST_PASSWORD="..." \
-  ALERT_WEBHOOK_URL="https://ntfy.sh/your-secret-topic"
-fly deploy
+vta health     # expect HTTP 200
+vta status     # last sync, item counts on both sides, guard state
 ```
 
-The volume matters. It holds the shadow state and the cached credentials; lose
-it and the next start treats both lists as brand new, which is safe — it unions
-them rather than deleting — but noisy.
-
-`auto_stop_machines` is off deliberately. The bridge polls Google; a machine
-that sleeps when no one is looking at its HTTP port syncs nothing.
+Then say *"Hey Google, add strawberries to the shopping list"* and watch it
+land in AnyList within about 20 seconds.
 
 ## Operating it
 
 ```bash
-curl https://your-app.fly.dev/status
+vta status     # last successful sync, failures, item counts, guard state
+vta health     # 200 while syncing, 503 once it has silently stopped
+vta logs       # both processes, followed
+vta jobs       # whether launchd has them running
+vta restart
 ```
 
-Reports the last successful sync, consecutive failures, item counts on both
-sides, and whether the guard has tripped. `/healthz` returns 503 once syncing
-has silently stopped, which is what the platform health check watches — a
-container that keeps answering while nothing syncs is the failure worth
-catching.
+`/healthz` returns 503 once syncing has stopped, which is the failure worth
+catching — a process that keeps answering while nothing syncs is exactly what
+a plain liveness check misses.
 
 ### "The guard paused a sync that looked destructive"
 
@@ -122,16 +143,16 @@ The bridge will not propagate a mass deletion the first time it sees one,
 because an unofficial API returning an empty list looks exactly like a user
 clearing their list. If the same change is still there on the next cycle it
 goes through. So: if you really did clear the list, wait one cycle. If you did
-not, look at `/status` — something is failing.
+not, look at `vta status` — something is failing.
 
 ### Rotating the token
 
-Re-run `voice-to-anylist bootstrap` and update `GOOGLE_MASTER_TOKEN`. Nothing
+Re-run `vta bootstrap`, update `GOOGLE_MASTER_TOKEN`, `vta restart`. Nothing
 else needs to change; the shadow state stays valid.
 
 ### If Google breaks the Keep API
 
 It might; it is unofficial and unendorsed. Both sides sit behind the same
-narrow client interface, so a replacement input — an Alexa skill, a webhook, a
-Home Assistant `todo` entity — is a new client class and no change to the merge
-engine.
+narrow client interface (`bridge/src/voice_to_anylist/clients/base.py`), so a
+replacement input — an Alexa skill, a webhook, a Home Assistant `todo` entity —
+is a new client class and no change to the merge engine.
