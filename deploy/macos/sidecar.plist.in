@@ -3,7 +3,7 @@
 <!--
   The Node facade over the unofficial AnyList client, on loopback only.
 
-  It reads the shared .env through Node's own --env-file, so credentials live
+  It reads the shared .env through Node's own env-file flag, so credentials live
   in one file rather than being duplicated into this plist.
 -->
 <plist version="1.0">

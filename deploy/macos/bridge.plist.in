@@ -4,7 +4,7 @@
   The Python bridge: polls Keep, merges, writes AnyList, reports on :8080.
 
   WorkingDirectory is the state directory because pydantic-settings resolves
-  .env relative to the working directory -- that is how this job finds the same
+  .env relative to the working directory, which is how this job finds the same
   credentials file the sidecar reads.
 -->
 <plist version="1.0">
