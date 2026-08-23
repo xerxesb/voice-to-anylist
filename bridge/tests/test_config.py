@@ -6,6 +6,7 @@ nobody looks -- so they are pinned here.
 """
 
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -105,3 +106,37 @@ def test_elsewhere_honours_xdg_state_home(monkeypatch, tmp_path):
 def test_the_http_endpoint_binds_loopback_by_default():
     """It reports state and needs no audience beyond the host it runs on."""
     assert Settings().http_host == "127.0.0.1"
+
+
+# -- the shipped example is what a fresh host actually gets ------------------
+
+
+def test_the_example_env_leaves_a_fresh_host_unconfigured(tmp_path, monkeypatch):
+    """A placeholder credential is worse than an empty one.
+
+    install.sh seeds .env from .env.example, so a plausible-looking value there
+    reads as configured: the bridge authenticates with it, fails, and reports
+    an auth error instead of saying it has not been set up yet.
+    """
+    example = Path(__file__).resolve().parents[2] / ".env.example"
+    (tmp_path / ".env").write_text(example.read_text())
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("VTA_STATE_DIR", raising=False)
+    for name in ("GOOGLE_EMAIL", "GOOGLE_MASTER_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+
+    settings = Settings()
+
+    assert settings.missing_credentials() == ["GOOGLE_EMAIL", "GOOGLE_MASTER_TOKEN"]
+
+
+def test_the_example_env_still_carries_the_non_secret_defaults(tmp_path, monkeypatch):
+    example = Path(__file__).resolve().parents[2] / ".env.example"
+    (tmp_path / ".env").write_text(example.read_text())
+    monkeypatch.chdir(tmp_path)
+
+    settings = Settings()
+
+    assert settings.anylist_list == "Grocery"
+    assert settings.keep_note_title == "Shopping list"
+    assert settings.dry_run is False

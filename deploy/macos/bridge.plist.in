@@ -22,6 +22,10 @@
   <dict>
     <key>VTA_STATE_DIR</key>
     <string>__STATE_DIR__</string>
+    <!-- launchd captures stdout to a file, not a tty, so Python would
+         otherwise buffer the log and hide what just went wrong. -->
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
     <key>PATH</key>
     <string>__RUNTIME_DIR__/venv/bin:__RUNTIME_DIR__/node/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
