@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+
+# Runtime state & secrets
+.env
+data/
+*.sqlite
+*.sqlite3
+.anylist_credentials
