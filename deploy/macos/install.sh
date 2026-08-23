@@ -163,7 +163,7 @@ reload() {
   # redeploy half applied -- the old code still running under the new plist.
   while launchctl print "gui/$UID/$label" >/dev/null 2>&1; do
     waited=$((waited + 1))
-    [ "$waited" -gt 50 ] && die "$label will not unload; try: launchctl bootout gui/$UID/$label"
+    [ "$waited" -gt 50 ] && die "$label will not unload. Try: launchctl bootout gui/$UID/$label"
     sleep 0.2
   done
   launchctl bootstrap "gui/$UID" "$plist"

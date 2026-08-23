@@ -27,21 +27,21 @@ PORT="${HTTP_PORT:-8080}"
 
 # Sidecar first on the way up so the bridge's opening cycle has something to
 # talk to, and last on the way down.
-UP="$SIDECAR_LABEL $BRIDGE_LABEL"
-DOWN="$BRIDGE_LABEL $SIDECAR_LABEL"
+UP=("$SIDECAR_LABEL" "$BRIDGE_LABEL")
+DOWN=("$BRIDGE_LABEL" "$SIDECAR_LABEL")
 
 case "${1:-}" in
-  start)   for l in $UP; do launchctl kickstart "gui/$UID/$l"; done
+  start)   for l in "${UP[@]}"; do launchctl kickstart "gui/$UID/$l"; done
            printf 'started\n' ;;
-  stop)    for l in $DOWN; do launchctl kill SIGTERM "gui/$UID/$l" 2>/dev/null || true; done
+  stop)    for l in "${DOWN[@]}"; do launchctl kill SIGTERM "gui/$UID/$l" 2>/dev/null || true; done
            printf 'stopped (launchd will restart them; use uninstall.sh to remove)\n' ;;
-  restart) for l in $UP; do launchctl kickstart -k "gui/$UID/$l"; done
+  restart) for l in "${UP[@]}"; do launchctl kickstart -k "gui/$UID/$l"; done
            printf 'restarted\n' ;;
   status)  curl -fsS "http://127.0.0.1:$PORT/status" 2>/dev/null | "$RUNTIME_DIR/venv/bin/python" -m json.tool \
-             || printf 'the bridge is not answering on :%s -- try `vta logs`\n' "$PORT" ;;
+             || printf 'the bridge is not answering on :%s -- try "vta logs"\n' "$PORT" ;;
   health)  curl -s -o /dev/stdout -w '\nHTTP %{http_code}\n' "http://127.0.0.1:$PORT/healthz" ;;
   logs)    tail -n 50 -F "$LOG_DIR/bridge.log" "$LOG_DIR/sidecar.log" ;;
-  jobs)    for l in $UP; do
+  jobs)    for l in "${UP[@]}"; do
              printf '%s: %s\n' "$l" \
                "$(launchctl print "gui/$UID/$l" 2>/dev/null | awk '/state = /{print $3; exit}' || echo 'not loaded')"
            done ;;

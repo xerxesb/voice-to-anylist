@@ -16,4 +16,3 @@ data/
 *.sqlite
 *.sqlite3
 .anylist_credentials
-.venv/
