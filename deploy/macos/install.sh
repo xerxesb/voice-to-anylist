@@ -90,10 +90,19 @@ fi
 
 export UV_PYTHON_INSTALL_DIR="$RUNTIME_DIR/python"
 say "installing CPython $PYTHON_VERSION"
-"$UV" python install "$PYTHON_VERSION"
+# --no-bin: everything here runs out of the venv or by absolute path, so the
+# shims in ~/.local/bin would only be another thing to collide with.
+"$UV" python install --no-bin "$PYTHON_VERSION"
 
-say "building the virtualenv"
-"$UV" venv --python "$PYTHON_VERSION" "$VENV_DIR" >/dev/null
+# Reuse the virtualenv across deploys, but rebuild it if the pinned Python has
+# moved underneath it -- otherwise a version bump silently keeps the old one.
+if "$VENV_DIR/bin/python" -V 2>/dev/null | grep -q "^Python $PYTHON_VERSION\."; then
+  say "reusing the virtualenv"
+  "$UV" venv --python "$PYTHON_VERSION" --allow-existing "$VENV_DIR" >/dev/null
+else
+  say "building the virtualenv"
+  "$UV" venv --python "$PYTHON_VERSION" --clear "$VENV_DIR" >/dev/null
+fi
 VIRTUAL_ENV="$VENV_DIR" "$UV" pip install --quiet "$REPO_DIR/bridge"
 
 # -- Node -------------------------------------------------------------------
