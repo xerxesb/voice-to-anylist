@@ -47,6 +47,14 @@ class AnyListClient:
             raise ListClientError(f"AnyList {method} {path} -> {response.status_code}: {detail}")
         return response
 
+    def lists(self) -> list[str]:
+        """Every list name on the account, for `doctor` to print.
+
+        The configured name has to be matched exactly, and the failure mode of
+        getting it wrong is a sync that proposes deleting everything.
+        """
+        return list(self._request("GET", "/lists").json().get("lists", []))
+
     def fetch(self) -> list[ListItem]:
         payload = self._request("GET", "/items", params={"list": self.list_name}).json()
         return [

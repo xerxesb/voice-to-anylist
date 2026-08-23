@@ -60,6 +60,9 @@ class Status:
             "guard_reason": self.guard_reason,
             "keep_items": self.keep_items,
             "anylist_items": self.anylist_items,
+            # Always present so a caller can test one key rather than two
+            # shapes; a configured service simply reports nothing missing.
+            "unconfigured": [],
         }
 
 
@@ -238,5 +241,34 @@ def create_app(service: BridgeService) -> FastAPI:
             },
             **service.status.as_dict(),
         }
+
+    return app
+
+
+def create_unconfigured_app(missing: list[str]) -> FastAPI:
+    """Serve the reason rather than exiting.
+
+    Missing credentials and a runtime failure want opposite handling.  A
+    runtime failure should take the process down so launchd replaces it, but
+    missing credentials need a human, and exiting just earns a restart loop
+    throttled to ten minutes with the explanation scrolled off the top of the
+    log.  Staying up puts it somewhere a curl can read, and keeps the CLI
+    usable for the bootstrap that fixes it.
+    """
+    reason = f"not configured: {', '.join(missing)} must be set"
+    app = FastAPI(
+        title="voice-to-anylist (unconfigured)", docs_url=None, redoc_url=None
+    )
+
+    @app.get("/healthz")
+    def healthz() -> JSONResponse:
+        return JSONResponse(
+            {"ok": False, "unconfigured": missing, "last_error": reason},
+            status_code=503,
+        )
+
+    @app.get("/status")
+    def status() -> dict:
+        return {"unconfigured": missing, "last_error": reason}
 
     return app

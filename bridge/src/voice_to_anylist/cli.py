@@ -13,10 +13,12 @@ from . import bootstrap as bootstrap_mod
 from .clients.anylist import AnyListClient
 from .clients.base import ListClientError
 from .clients.keep import KeepClient
-from .config import Settings, load_settings
+from .config import Settings, default_state_dir, load_settings
 from .engine import GuardConfig, SyncEngine
-from .service import BridgeService, create_app
+from .service import BridgeService, create_app, create_unconfigured_app
 from .store import ShadowStore
+
+log = logging.getLogger(__name__)
 
 
 def _configure_logging(level: str) -> None:
@@ -42,11 +44,11 @@ def cmd_bootstrap(_args: argparse.Namespace, settings: Settings) -> int:
         print(f"\n{error}", file=sys.stderr)
         return 1
 
-    print("\nSuccess. Set these, and keep them secret:\n")
+    print("\nSuccess. Put these in your .env, and keep them secret:\n")
     print(f"  GOOGLE_EMAIL={email}")
     print(f"  GOOGLE_MASTER_TOKEN={token}")
-    print("\nOn Fly.io:\n")
-    print(f'  fly secrets set GOOGLE_EMAIL="{email}" GOOGLE_MASTER_TOKEN="{token}"')
+    print(f"\n.env lives at: {default_state_dir() / '.env'}")
+    print("Then restart the bridge:  vta restart")
     return 0
 
 
@@ -72,24 +74,47 @@ def cmd_doctor(_args: argparse.Namespace, settings: Settings) -> int:
     failures = 0
 
     try:
-        items = anylist.fetch()
-        print(f"  ok    AnyList list {settings.anylist_list!r}: {len(items)} items")
+        names = anylist.lists()
     except ListClientError as error:
         print(f"  FAIL  AnyList: {error}")
         failures += 1
+    else:
+        print(f"  ok    AnyList: {len(names)} list(s) on the account")
+        for name in names:
+            # Quoted, so a trailing space in a list name is visible rather than
+            # being the thing that mysteriously fails to match.
+            marker = "->" if name == settings.anylist_list else "  "
+            print(f"          {marker} {name!r}")
+        if settings.anylist_list not in names:
+            print(
+                f"  FAIL  ANYLIST_LIST is {settings.anylist_list!r}, which is not "
+                "one of those. Copy the spelling above."
+            )
+            failures += 1
+        else:
+            try:
+                items = anylist.fetch()
+                print(
+                    f"  ok    AnyList list {settings.anylist_list!r}: "
+                    f"{len(items)} item{'' if len(items) == 1 else 's'}"
+                )
+            except ListClientError as error:
+                print(f"  FAIL  AnyList: {error}")
+                failures += 1
 
     try:
         items = keep.fetch()
         checked = sum(1 for i in items if i.checked)
         print(
             f"  ok    Keep note {settings.keep_note_title!r}: "
-            f"{len(items)} items ({checked} ticked)"
+            f"{len(items)} item{'' if len(items) == 1 else 's'} ({checked} ticked)"
         )
     except ListClientError as error:
         print(f"  FAIL  Google Keep: {error}")
         failures += 1
 
-    anylist.close()
+    if hasattr(anylist, "close"):
+        anylist.close()
     print("\nAll checks passed." if not failures else f"\n{failures} check(s) failed.")
     return 1 if failures else 0
 
@@ -135,14 +160,22 @@ def cmd_sync(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def cmd_run(_args: argparse.Namespace, settings: Settings) -> int:
-    settings.require_credentials()
-    service = BridgeService(settings)
-    uvicorn.run(
-        create_app(service),
-        host=settings.http_host,
-        port=settings.http_port,
-        log_config=None,
-    )
+    missing = settings.missing_credentials()
+    if missing:
+        # Not an error to die of.  A crash loop under launchd gets throttled to
+        # a ten-minute retry and scrolls this line out of the log, so serve the
+        # reason instead and let a human fix it.
+        log.error(
+            "not configured: %s must be set in %s. "
+            "Run `vta bootstrap` for a Google master token. "
+            "Serving /healthz 503 until then.",
+            ", ".join(missing),
+            default_state_dir() / ".env",
+        )
+        app = create_unconfigured_app(missing)
+    else:
+        app = create_app(BridgeService(settings))
+    uvicorn.run(app, host=settings.http_host, port=settings.http_port, log_config=None)
     return 0
 
 

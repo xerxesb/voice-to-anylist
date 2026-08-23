@@ -1,9 +1,34 @@
-"""Runtime configuration, all of it environment-driven for container deploys."""
+"""Runtime configuration, all of it environment-driven."""
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+STATE_DIR_ENV = "VTA_STATE_DIR"
+
+
+def default_state_dir() -> Path:
+    """Where the shadow state and cached credentials live.
+
+    Deliberately a real per-user location rather than the old ``/data``, which
+    existed only inside the container image.  Running natively, a path that
+    does not exist is not an error -- SQLite happily creates one -- so a stale
+    default would silently strand the shadow somewhere nobody looks.
+    """
+    override = os.environ.get(STATE_DIR_ENV)
+    if override:
+        return Path(override)
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "voice-to-anylist"
+    xdg = os.environ.get("XDG_STATE_HOME")
+    if xdg:
+        return Path(xdg) / "voice-to-anylist"
+    return Path.home() / ".local" / "state" / "voice-to-anylist"
 
 
 class Settings(BaseSettings):
@@ -29,8 +54,10 @@ class Settings(BaseSettings):
     # -- Behaviour ----------------------------------------------------------
     poll_interval_seconds: float = 20.0
     dry_run: bool = False
-    state_path: str = "/data/state.sqlite"
-    keep_state_path: str = "/data/keep_state.json"
+    state_path: str = Field(default_factory=lambda: str(default_state_dir() / "state.sqlite"))
+    keep_state_path: str = Field(
+        default_factory=lambda: str(default_state_dir() / "keep_state.json")
+    )
 
     # -- Guard rails --------------------------------------------------------
     guard_min_deletes: int = 5
@@ -38,7 +65,9 @@ class Settings(BaseSettings):
     guard_empty_side_min_shadow: int = 3
 
     # -- Operations ---------------------------------------------------------
-    http_host: str = "0.0.0.0"  # noqa: S104 - the health endpoint is the container's probe
+    # Loopback: this reports state, and has no audience beyond the host it runs
+    # on.  Binding every interface would publish it to the household network.
+    http_host: str = "127.0.0.1"
     http_port: int = 8080
     alert_webhook_url: str = Field(
         default="",
@@ -46,8 +75,9 @@ class Settings(BaseSettings):
     )
     log_level: str = "INFO"
 
-    def require_credentials(self) -> None:
-        missing = [
+    def missing_credentials(self) -> list[str]:
+        """The settings the bridge cannot run without, by environment name."""
+        return [
             name
             for name, value in (
                 ("GOOGLE_EMAIL", self.google_email),
@@ -55,6 +85,9 @@ class Settings(BaseSettings):
             )
             if not value
         ]
+
+    def require_credentials(self) -> None:
+        missing = self.missing_credentials()
         if missing:
             raise SystemExit(
                 f"Missing required configuration: {', '.join(missing)}.\n"

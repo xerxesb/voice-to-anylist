@@ -8,6 +8,7 @@ in either side's own unit tests.  This drives the real Express server, with the
 
 from __future__ import annotations
 
+import httpx
 import pytest
 
 from voice_to_anylist.clients.anylist import AnyListClient
@@ -91,3 +92,23 @@ def test_an_unknown_list_reports_which_lists_exist(client, sidecar):
             missing.fetch()
     finally:
         missing.close()
+
+
+# -- an unconfigured sidecar stays up ----------------------------------------
+
+
+def test_it_serves_the_reason_rather_than_exiting(unconfigured_sidecar):
+    """Exiting earns a launchd restart loop that buries the explanation."""
+    response = httpx.get(f"{unconfigured_sidecar}/health", timeout=5)
+
+    assert response.status_code == 503
+    body = response.json()
+    assert body["ok"] is False
+    assert body["unconfigured"] == ["ANYLIST_EMAIL", "ANYLIST_PASSWORD"]
+
+
+def test_every_other_route_reports_it_too(unconfigured_sidecar):
+    response = httpx.get(f"{unconfigured_sidecar}/lists", timeout=5)
+
+    assert response.status_code == 503
+    assert "ANYLIST_EMAIL" in response.text

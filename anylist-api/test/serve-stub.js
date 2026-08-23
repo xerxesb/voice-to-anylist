@@ -10,8 +10,10 @@ Module._resolveFilename = function (request, ...rest) {
   return resolve.call(this, request, ...rest);
 };
 
-process.env.ANYLIST_EMAIL = process.env.ANYLIST_EMAIL || 'test@example.com';
-process.env.ANYLIST_PASSWORD = process.env.ANYLIST_PASSWORD || 'test';
+// Only default when unset, so a test can pass an empty string to exercise
+// the unconfigured path rather than being silently given credentials.
+if (process.env.ANYLIST_EMAIL === undefined) process.env.ANYLIST_EMAIL = 'test@example.com';
+if (process.env.ANYLIST_PASSWORD === undefined) process.env.ANYLIST_PASSWORD = 'test';
 process.env.ANYLIST_CREDENTIALS_FILE = '/tmp/stub-credentials';
 
 require('../server.js');

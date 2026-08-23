@@ -191,3 +191,12 @@ def test_health_endpoint_reports_503_once_syncing_has_stopped(service):
     routes = {r.path: r.endpoint for r in create_app(service).routes if hasattr(r, "endpoint")}
 
     assert routes["/healthz"]().status_code == 503
+
+
+def test_a_configured_service_reports_nothing_missing_on_status(service, keep):
+    """The key is always present, so a caller tests one shape rather than two."""
+    from voice_to_anylist.service import create_app
+
+    routes = {r.path: r.endpoint for r in create_app(service).routes if hasattr(r, "endpoint")}
+
+    assert routes["/status"]()["unconfigured"] == []

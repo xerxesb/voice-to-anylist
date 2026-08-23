@@ -12,19 +12,49 @@
  * engine needs: stable item ids, a separate quantity field, and a checked flag.
  */
 
+const os = require('os');
+const path = require('path');
+
 const express = require('express');
 const AnyList = require('anylist');
+
+/**
+ * Where cached credentials live, matching `config.default_state_dir()` on the
+ * Python side.  The launchd job sets ANYLIST_CREDENTIALS_FILE explicitly; this
+ * is the default that keeps a bare `node server.js` sane during development.
+ */
+function defaultStateDir() {
+  if (process.env.VTA_STATE_DIR) return process.env.VTA_STATE_DIR;
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library', 'Application Support', 'voice-to-anylist');
+  }
+  if (process.env.XDG_STATE_HOME) {
+    return path.join(process.env.XDG_STATE_HOME, 'voice-to-anylist');
+  }
+  return path.join(os.homedir(), '.local', 'state', 'voice-to-anylist');
+}
 
 const PORT = Number(process.env.ANYLIST_API_PORT || 3000);
 const HOST = process.env.ANYLIST_API_HOST || '127.0.0.1';
 const TOKEN = process.env.ANYLIST_API_TOKEN || '';
 const EMAIL = process.env.ANYLIST_EMAIL;
 const PASSWORD = process.env.ANYLIST_PASSWORD;
-const CREDENTIALS_FILE = process.env.ANYLIST_CREDENTIALS_FILE || '/data/.anylist_credentials';
+const CREDENTIALS_FILE =
+  process.env.ANYLIST_CREDENTIALS_FILE || path.join(defaultStateDir(), '.anylist_credentials');
 
-if (!EMAIL || !PASSWORD) {
-  console.error('ANYLIST_EMAIL and ANYLIST_PASSWORD must be set');
-  process.exit(1);
+// Missing credentials are a configuration problem, not a crash.  Exiting here
+// earns a launchd restart loop throttled to a ten-minute retry, with this
+// message scrolled out of the log; staying up serves the reason on /health and
+// leaves the process there for `vta doctor` to talk to.
+const MISSING = [
+  ['ANYLIST_EMAIL', EMAIL],
+  ['ANYLIST_PASSWORD', PASSWORD],
+]
+  .filter(([, value]) => !value)
+  .map(([name]) => name);
+
+if (MISSING.length) {
+  console.error(`not configured: ${MISSING.join(' and ')} must be set. Serving 503 until then.`);
 }
 
 let any = null;
@@ -112,6 +142,17 @@ function findItem(list, id) {
 
 const app = express();
 app.use(express.json());
+
+// Before authentication: an unconfigured sidecar has no token to check
+// against, and the reason is not a secret.
+app.use((req, res, next) => {
+  if (!MISSING.length) return next();
+  return res.status(503).json({
+    ok: false,
+    unconfigured: MISSING,
+    error: `not configured: ${MISSING.join(', ')} must be set`,
+  });
+});
 
 app.use((req, res, next) => {
   if (TOKEN && req.headers.authorization !== `Bearer ${TOKEN}`) {
