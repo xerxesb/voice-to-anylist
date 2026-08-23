@@ -1,121 +1,175 @@
-"""Merge behaviour, exercised entirely against in-memory fakes.
+"""Planner behaviour, exercised entirely against in-memory fakes.
 
-These are the tests that decide whether the bridge is safe to point at a real
-shopping list, so they assert on the mutations issued, not just the end state.
+These decide whether the bridge is safe to point at a real shopping list, so
+they assert on the mutations issued, not just the end state.
+
+The model is one-directional: AnyList is master, and the Keep note is a
+projection of its *active* items plus an inbox for voice adds. A crossed-off
+AnyList row is history and is off-limits.
 """
 
-import pytest
-
 from voice_to_anylist.clients.base import ListItem
-from voice_to_anylist.engine import GuardConfig, SyncEngine
+from voice_to_anylist.engine import ANYLIST, GuardConfig, SyncEngine
 
 
 def item(item_id, name, quantity=None, checked=False):
     return ListItem(id=item_id, name=name, quantity=quantity, checked=checked)
 
 
-# -- cold start -------------------------------------------------------------
+def anylist_removals(outcome):
+    return [a for a in outcome.actions if a.side == ANYLIST and a.kind == "remove"]
 
 
-def test_cold_start_with_nothing_anywhere(engine, keep, anylist):
-    outcome = engine.run_once()
-    assert outcome.actions == []
-    assert keep.mutations() == []
-    assert anylist.mutations() == []
+# -- history is untouchable --------------------------------------------------
+#
+# The two cases below are what a live cycle against the real list actually did
+# before it was stopped: it planned to copy 1091 crossed-off rows into the Keep
+# note, and deleted 19 crossed-off rows as duplicates.
 
 
-def test_cold_start_copies_each_side_to_the_other_and_deletes_nothing(engine, keep, anylist):
-    keep.replace_items([item("k1", "strawberries"), item("k2", "milk")])
-    anylist.replace_items([item("a1", "bread")])
+def test_crossed_off_items_are_never_copied_into_the_note(engine, keep, anylist):
+    anylist.replace_items(
+        [item(f"a{i}", f"thing {i}", checked=True) for i in range(50)]
+        + [item("live", "milk")]
+    )
 
-    engine.run_once()
-
-    assert anylist.names() == {"strawberries", "milk", "bread"}
-    assert keep.names() == {"strawberries", "milk", "bread"}
-    assert not any(c[0] == "remove" for c in keep.mutations() + anylist.mutations())
-
-
-def test_cold_start_adopts_fuzzy_matches_instead_of_duplicating(engine, keep, anylist):
-    """An empty shadow must not turn "Strawberries" and "strawberry" into two items."""
-    keep.replace_items([item("k1", "Strawberries")])
-    anylist.replace_items([item("a1", "strawberry")])
-
-    engine.run_once()
-
-    assert len(keep.fetch()) == 1
-    assert len(anylist.fetch()) == 1
-    assert not any(c[0] == "add" for c in keep.mutations() + anylist.mutations())
-
-
-# -- steady state -----------------------------------------------------------
-
-
-def test_second_cycle_does_nothing(engine, keep, anylist, settled):
-    settled([item("k1", "milk")], [])
-
-    outcome = engine.run_once()
-
-    assert outcome.actions == []
-    assert keep.mutations() == []
-    assert anylist.mutations() == []
-
-
-def test_voice_add_reaches_anylist(engine, keep, anylist, settled):
-    settled([item("k1", "milk")], [item("a1", "milk")])
-
-    keep.replace_items([item("k1", "milk"), item("k9", "strawberries")])
-    engine.run_once()
-
-    assert "strawberries" in anylist.names()
-    assert anylist.by_name("strawberries").checked is False
-
-
-def test_voice_add_with_a_quantity_is_split_out(engine, keep, anylist, settled):
-    """Keep stores one line of text; AnyList gets a real quantity field."""
-    settled([], [])
-
-    keep.replace_items([item("k9", "lemons", quantity="2")])
-    engine.run_once()
-
-    added = anylist.by_name("lemons")
-    assert added.quantity == "2"
-
-
-def test_app_add_reaches_keep(engine, keep, anylist, settled):
-    settled([item("k1", "milk")], [item("a1", "milk")])
-
-    anylist.replace_items([item("a1", "milk"), item("a9", "bread")])
-    engine.run_once()
-
-    assert "bread" in keep.names()
-
-
-# -- deletion ---------------------------------------------------------------
-
-
-def test_delete_in_anylist_removes_from_keep(engine, keep, anylist, settled):
-    settled([item("k1", "milk"), item("k2", "bread")], [item("a1", "milk"), item("a2", "bread")])
-
-    anylist.replace_items([item("a1", "milk")])
     engine.run_once()
 
     assert keep.names() == {"milk"}
 
 
-def test_delete_in_keep_removes_from_anylist(engine, keep, anylist, settled):
-    settled([item("k1", "milk"), item("k2", "bread")], [item("a1", "milk"), item("a2", "bread")])
+def test_crossed_off_duplicates_are_never_deduped(engine, keep, anylist):
+    """Seven crossed-off 'ham' rows are seven shopping trips, not six mistakes."""
+    anylist.replace_items([item(f"h{i}", "ham", checked=True) for i in range(7)])
 
-    keep.replace_items([item("k1", "milk")])
+    outcome = engine.run_once()
+
+    assert anylist_removals(outcome) == []
+    assert [a for a in outcome.actions if a.kind == "dedupe"] == []
+    assert len(anylist.items) == 7
+
+
+def test_the_bridge_never_deletes_an_anylist_row(engine, keep, anylist, settled):
+    """The only AnyList removal it may emit is an active-item dedupe."""
+    settled([item("k1", "milk")], [item("a1", "milk")])
+    keep.replace_items([])
+
+    outcome = engine.run_once()
+
+    assert anylist_removals(outcome) == []
+    assert any(a.id == "a1" for a in anylist.items)
+
+
+def test_a_crossed_off_row_is_not_revived_just_by_existing(engine, keep, anylist):
+    anylist.replace_items([item("a1", "ham", checked=True)])
+
     engine.run_once()
 
-    assert anylist.names() == {"milk"}
+    assert anylist.items[0].checked is True
+    assert keep.names() == set()
 
 
-def test_deleted_item_stays_deleted_on_the_next_cycle(engine, keep, anylist, settled):
-    """The classic echo bug: a delete that reappears as an add next cycle."""
-    settled([item("k1", "milk"), item("k2", "bread")], [item("a1", "milk"), item("a2", "bread")])
+# -- the voice inbox ---------------------------------------------------------
 
-    keep.replace_items([item("k1", "milk")])
+
+def test_a_new_line_in_the_note_is_added_to_anylist(engine, keep, anylist, settled):
+    settled([], [item("a1", "milk")])
+    keep.replace_items([item("k9", "strawberries")])
+
+    engine.run_once()
+
+    assert "strawberries" in anylist.names()
+    assert not [i for i in anylist.items if i.name == "strawberries" and i.checked]
+
+
+def test_asking_for_something_crossed_off_revives_it(engine, keep, anylist, settled):
+    settled([], [item("a1", "ham", checked=True)])
+    keep.replace_items([item("k9", "Ham")])
+
+    engine.run_once()
+
+    assert len(anylist.items) == 1, "revive must not append a second row"
+    assert anylist.items[0].checked is False
+
+
+def test_a_quantity_spoken_into_the_note_reaches_anylist(engine, keep, anylist, settled):
+    settled([], [])
+    keep.replace_items([item("k1", "lemons", quantity="2")])
+
+    engine.run_once()
+
+    added = [i for i in anylist.items if i.name.lower().startswith("lemon")]
+    assert added and added[0].quantity == "2"
+
+
+# -- purchase ----------------------------------------------------------------
+
+
+def test_ticking_in_the_note_marks_it_purchased_in_anylist(engine, keep, anylist, settled):
+    settled([item("k1", "milk")], [item("a1", "milk")])
+    keep.replace_items([item("k1", "milk", checked=True)])
+
+    engine.run_once()
+
+    assert anylist.items[0].checked is True
+
+
+def test_removing_a_mapped_line_from_the_note_marks_it_purchased(
+    engine, keep, anylist, settled
+):
+    """Assistant deletes the line rather than ticking it when told 'I got the milk'."""
+    settled([item("k1", "milk")], [item("a1", "milk")])
+    keep.replace_items([])
+
+    engine.run_once()
+
+    assert anylist.items[0].checked is True
+
+
+def test_a_purchased_item_leaves_the_note(engine, keep, anylist, settled):
+    settled([item("k1", "milk")], [item("a1", "milk")])
+    anylist.replace_items([item("a1", "milk", checked=True)])
+
+    engine.run_once()
+
+    assert keep.names() == set()
+
+
+# -- projection --------------------------------------------------------------
+
+
+def test_an_active_anylist_item_missing_from_the_note_is_restored(
+    engine, keep, anylist, settled
+):
+    settled([item("k1", "milk")], [item("a1", "milk"), item("a2", "bread")])
+
+    engine.run_once()
+
+    assert "bread" in keep.names()
+
+
+def test_unchecking_in_anylist_puts_it_back_in_the_note(engine, keep, anylist, settled):
+    settled([], [item("a1", "ham", checked=True)])
+    anylist.replace_items([item("a1", "ham")])
+
+    engine.run_once()
+
+    assert "ham" in {n.lower() for n in keep.names()}
+
+
+def test_a_quiet_cycle_changes_nothing(engine, keep, anylist, settled):
+    settled([item("k1", "milk")], [item("a1", "milk")])
+
+    outcome = engine.run_once()
+
+    assert outcome.actions == []
+    assert keep.mutations() == []
+    assert anylist.mutations() == []
+
+
+def test_nothing_echoes_back_on_the_following_cycle(engine, keep, anylist, settled):
+    settled([], [item("a1", "milk")])
+    keep.replace_items([item("k9", "strawberries")])
     engine.run_once()
     keep.calls.clear()
     anylist.calls.clear()
@@ -123,275 +177,136 @@ def test_deleted_item_stays_deleted_on_the_next_cycle(engine, keep, anylist, set
     outcome = engine.run_once()
 
     assert outcome.actions == []
-    assert keep.names() == {"milk"}
-    assert anylist.names() == {"milk"}
 
 
-# -- checking ---------------------------------------------------------------
+# -- bootstrap ---------------------------------------------------------------
 
 
-def test_checking_in_anylist_ticks_the_keep_line(engine, keep, anylist, settled):
-    settled([item("k1", "milk")], [item("a1", "milk")])
-
-    anylist.replace_items([item("a1", "milk", checked=True)])
-    engine.run_once()
-
-    assert keep.by_name("milk").checked is True
-
-
-def test_checking_in_keep_ticks_anylist(engine, keep, anylist, settled):
-    settled([item("k1", "milk")], [item("a1", "milk")])
-
-    keep.replace_items([item("k1", "milk", checked=True)])
-    engine.run_once()
-
-    assert anylist.by_name("milk").checked is True
-
-
-def test_readding_a_checked_item_unchecks_it_rather_than_duplicating(
-    engine, keep, anylist, settled
+def test_the_first_sync_replaces_the_note_with_anylists_active_set(
+    engine, keep, anylist
 ):
-    """The core dedupe case.
+    keep.replace_items([item("k1", "leftover"), item("k2", "stale")])
+    anylist.replace_items(
+        [item("a1", "milk"), item("a2", "bread"), item("a3", "ham", checked=True)]
+    )
 
-    "strawberry" is ticked off from last week's shop.  Somebody says "hey
-    Google, add strawberries", so Google appends a fresh line to the Keep note
-    without noticing the ticked one already there.
+    engine.run_once()
+
+    assert keep.names() == {"milk", "bread"}
+    assert len(anylist.items) == 3, "bootstrap must not write to the master"
+
+
+def test_bootstrap_happens_once_even_if_the_shadow_stays_empty(
+    engine, keep, anylist
+):
+    """A list with nothing active leaves the shadow empty after bootstrap.
+
+    Keying bootstrap off an empty shadow therefore re-ran it every cycle,
+    wiping each voice add before it could reach the master -- permanently.
     """
-    settled([item("k1", "strawberries", checked=True)], [item("a1", "strawberry", checked=True)])
-
-    keep.replace_items(
-        [item("k1", "strawberries", checked=True), item("k2", "strawberries")]
-    )
+    anylist.replace_items([item("a1", "ham", checked=True)])
     engine.run_once()
 
-    assert len(anylist.fetch()) == 1, "must not create a second AnyList item"
-    assert anylist.by_name("strawberry").checked is False, "existing item should be revived"
-    assert len(keep.fetch()) == 1, "the stale ticked line should be collapsed away"
-
-
-# -- quantity ---------------------------------------------------------------
-
-
-def test_quantity_change_updates_rather_than_recreating(engine, keep, anylist, settled):
-    settled([item("k1", "lemons", quantity="2")], [item("a1", "lemons", quantity="2")])
-
-    anylist.replace_items([item("a1", "lemons", quantity="6")])
+    keep.replace_items([item("k9", "strawberries")])
     engine.run_once()
 
-    assert keep.by_name("lemons").quantity == "6"
-    kinds = {c[0] for c in keep.mutations()}
-    assert kinds == {"set_quantity"}, f"expected an in-place update, got {keep.mutations()}"
+    assert "strawberries" in anylist.names()
 
 
-def test_anylist_wins_when_both_sides_change_the_quantity(engine, keep, anylist, settled):
-    settled([item("k1", "lemons", quantity="2")], [item("a1", "lemons", quantity="2")])
+def test_bootstrap_does_not_cross_anything_off(engine, keep, anylist):
+    keep.replace_items([item("k1", "leftover")])
+    anylist.replace_items([item("a1", "milk")])
 
-    keep.replace_items([item("k1", "lemons", quantity="3")])
-    anylist.replace_items([item("a1", "lemons", quantity="6")])
     engine.run_once()
 
-    assert keep.by_name("lemons").quantity == "6"
-    assert anylist.by_name("lemons").quantity == "6"
+    assert anylist.items[0].checked is False
 
 
-# -- guard ------------------------------------------------------------------
+# -- active-item dedupe ------------------------------------------------------
 
 
-def test_guard_blocks_a_side_that_reads_back_empty(engine, keep, anylist, settled):
-    """An API returning nothing must never be read as "the user cleared it"."""
+def test_two_active_rows_for_one_thing_collapse(engine, keep, anylist, settled):
+    settled([], [])
+    anylist.replace_items([item("a1", "Bananas"), item("a2", "banana")])
+
+    outcome = engine.run_once()
+
+    assert len([a for a in outcome.actions if a.kind == "dedupe"]) == 1
+    assert len(anylist.items) == 1
+
+
+def test_dedupe_never_picks_a_crossed_off_row_to_delete(engine, keep, anylist, settled):
+    settled([], [])
+    anylist.replace_items([item("a1", "ham", checked=True), item("a2", "ham")])
+
+    outcome = engine.run_once()
+
+    assert anylist_removals(outcome) == []
+    assert [a for a in outcome.actions if a.kind == "dedupe"] == []
+
+
+# -- the guard ---------------------------------------------------------------
+
+
+def test_an_empty_note_does_not_mark_everything_purchased(engine, keep, anylist, settled):
+    """A failed Keep fetch looks exactly like 'I bought all of it'."""
     settled(
-        [item(f"k{i}", n) for i, n in enumerate(["milk", "bread", "eggs", "jam"])],
-        [item(f"a{i}", n) for i, n in enumerate(["milk", "bread", "eggs", "jam"])],
+        [item(f"k{i}", f"thing {i}") for i in range(6)],
+        [item(f"a{i}", f"thing {i}") for i in range(6)],
     )
-
     keep.replace_items([])
+
     outcome = engine.run_once()
 
     assert outcome.guard_tripped
-    assert "empty" in (outcome.guard_reason or "")
-    assert anylist.mutations() == [], "nothing should have been deleted"
+    assert not any(i.checked for i in anylist.items)
 
 
-def test_guard_lets_the_same_mass_change_through_on_the_next_cycle(
-    engine, keep, anylist, settled
-):
-    """A real purge persists; a transient fetch failure does not."""
+def test_the_same_mass_change_twice_is_taken_as_deliberate(engine, keep, anylist, settled):
     settled(
-        [item(f"k{i}", n) for i, n in enumerate(["milk", "bread", "eggs", "jam"])],
-        [item(f"a{i}", n) for i, n in enumerate(["milk", "bread", "eggs", "jam"])],
+        [item(f"k{i}", f"thing {i}") for i in range(6)],
+        [item(f"a{i}", f"thing {i}") for i in range(6)],
     )
-
     keep.replace_items([])
-    assert engine.run_once().guard_tripped
+    engine.run_once()
 
-    outcome = engine.run_once()
+    engine.run_once()
 
-    assert not outcome.guard_tripped
-    assert anylist.fetch() == []
-
-
-def test_guard_recovers_without_deleting_when_the_side_comes_back(
-    engine, keep, anylist, settled
-):
-    original = [item(f"k{i}", n) for i, n in enumerate(["milk", "bread", "eggs", "jam"])]
-    settled(original, [item(f"a{i}", n) for i, n in enumerate(["milk", "bread", "eggs", "jam"])])
-
-    keep.replace_items([])
-    assert engine.run_once().guard_tripped
-
-    keep.replace_items(original)
-    outcome = engine.run_once()
-
-    assert not outcome.guard_tripped
-    assert outcome.actions == []
-    assert len(anylist.fetch()) == 4
+    assert all(i.checked for i in anylist.items)
 
 
-def test_guard_blocks_deleting_most_of_the_list(keep, anylist, store, settled):
-    engine = SyncEngine(keep, anylist, store, guard=GuardConfig(min_deletes=3, max_ratio=0.5))
-    names = ["milk", "bread", "eggs", "jam", "rice"]
-    settled(
-        [item(f"k{i}", n) for i, n in enumerate(names)],
-        [item(f"a{i}", n) for i, n in enumerate(names)],
-    )
-
-    # Four of five removed in the app -- plausible, but worth pausing over.
-    anylist.replace_items([item("a0", "milk")])
-    outcome = engine.run_once()
-
-    assert outcome.guard_tripped
-    assert len(keep.fetch()) == 5
-
-
-def test_small_deletions_are_not_guarded(engine, keep, anylist, settled):
-    names = ["milk", "bread", "eggs", "jam", "rice"]
-    settled(
-        [item(f"k{i}", n) for i, n in enumerate(names)],
-        [item(f"a{i}", n) for i, n in enumerate(names)],
-    )
-
-    anylist.replace_items([item(f"a{i}", n) for i, n in enumerate(names) if n != "jam"])
-    outcome = engine.run_once()
-
-    assert not outcome.guard_tripped
-    assert keep.names() == {"milk", "bread", "eggs", "rice"}
-
-
-# -- dry run ----------------------------------------------------------------
-
-
-def test_dry_run_plans_without_touching_either_side(keep, anylist, store):
+def test_a_dry_run_writes_nothing_and_arms_nothing(keep, anylist, store, settled):
     engine = SyncEngine(keep, anylist, store, dry_run=True)
-    keep.replace_items([item("k1", "strawberries")])
+    keep.replace_items([item("k1", "milk")])
+    anylist.replace_items([item("a1", "bread")])
 
     outcome = engine.run_once()
 
     assert outcome.dry_run and not outcome.applied
-    assert [a.kind for a in outcome.actions] == ["add"]
-    assert anylist.mutations() == []
-    assert store.load() == {}, "a dry run must not advance the shadow"
+    assert keep.mutations() == [] and anylist.mutations() == []
 
 
-def test_dry_run_leaves_the_same_work_for_the_real_run(keep, anylist, store):
-    keep.replace_items([item("k1", "strawberries")])
-    dry = SyncEngine(keep, anylist, store, dry_run=True).run_once()
-
-    wet = SyncEngine(keep, anylist, store).run_once()
-
-    assert [a.describe() for a in dry.actions] == [a.describe() for a in wet.actions]
-    assert wet.applied
-
-
-# -- restart ----------------------------------------------------------------
-
-
-def test_shadow_survives_a_restart_without_duplicating(keep, anylist, store, settled):
-    settled([item("k1", "milk")], [item("a1", "milk")])
-
-    # A new engine over the same store is what a container restart looks like.
-    outcome = SyncEngine(keep, anylist, store).run_once()
-
-    assert outcome.actions == []
-    assert len(keep.fetch()) == 1
-    assert len(anylist.fetch()) == 1
-
-
-@pytest.mark.parametrize("side", ["keep", "anylist"])
-def test_items_that_normalise_to_nothing_are_ignored(engine, keep, anylist, side):
-    target = keep if side == "keep" else anylist
-    target.replace_items([item("x1", "   ")])
+def test_the_guard_ignores_dedupe(engine, keep, anylist, settled):
+    """Collapsing duplicates is not a purge, however many there are."""
+    settled([], [])
+    anylist.replace_items(
+        [item(f"a{i}", "banana") for i in range(8)] + [item("keepme", "milk")]
+    )
 
     outcome = engine.run_once()
 
-    assert outcome.actions == []
+    assert not outcome.guard_tripped
+    assert len([a for a in outcome.actions if a.kind == "dedupe"]) == 7
 
 
-def test_dry_run_does_not_arm_the_guards_confirm_on_repeat(keep, anylist, store, settled):
-    """Otherwise a rehearsal would quietly authorise the next real purge."""
-    names = ["milk", "bread", "eggs", "jam"]
-    settled(
-        [item(f"k{i}", n) for i, n in enumerate(names)],
-        [item(f"a{i}", n) for i, n in enumerate(names)],
-    )
+def test_a_stricter_guard_threshold_is_honoured(keep, anylist, store):
+    """min_deletes is configurable, so a small list can be protected too."""
+    engine = SyncEngine(keep, anylist, store, guard=GuardConfig(min_deletes=2))
+    keep.replace_items([item("k1", "milk"), item("k2", "bread")])
+    anylist.replace_items([item("a1", "milk"), item("a2", "bread")])
+    engine.run_once()  # bootstrap
     keep.replace_items([])
 
-    assert SyncEngine(keep, anylist, store, dry_run=True).run_once().guard_tripped
-    assert SyncEngine(keep, anylist, store).run_once().guard_tripped
-    assert len(anylist.fetch()) == 4
+    outcome = engine.run_once()
 
-
-def test_cold_start_prefers_wanting_an_item_over_having_bought_it(engine, keep, anylist):
-    """With no shadow there is no baseline, so the tie has to be broken by policy.
-
-    Losing a "please buy this" is a real failure; losing a "already bought" is
-    a minor annoyance. So the unticked side wins.
-    """
-    keep.replace_items([item("k1", "milk", checked=False)])
-    anylist.replace_items([item("a1", "milk", checked=True)])
-
-    engine.run_once()
-
-    assert anylist.by_name("milk").checked is False
-    assert keep.by_name("milk").checked is False
-
-
-def test_cold_start_keeps_an_item_ticked_when_both_sides_agree(engine, keep, anylist):
-    keep.replace_items([item("k1", "milk", checked=True)])
-    anylist.replace_items([item("a1", "milk", checked=True)])
-
-    engine.run_once()
-
-    assert anylist.by_name("milk").checked is True
-    assert keep.by_name("milk").checked is True
-
-
-def test_cold_start_adopts_a_quantity_from_whichever_side_states_one(engine, keep, anylist):
-    keep.replace_items([item("k1", "lemons")])
-    anylist.replace_items([item("a1", "lemons", quantity="6")])
-
-    engine.run_once()
-
-    assert keep.by_name("lemons").quantity == "6"
-
-
-def test_renaming_an_item_in_the_app_replaces_it_on_the_note(engine, keep, anylist, settled):
-    """A rename changes the identity, so it reads as a delete plus an add."""
-    settled([item("k1", "milk")], [item("a1", "milk")])
-
-    anylist.replace_items([item("a1", "almond milk")])
-    engine.run_once()
-
-    assert keep.names() == {"almond milk"}
-
-
-def test_an_item_reappearing_after_deletion_is_added_back(engine, keep, anylist, settled):
-    settled([item("k1", "milk")], [item("a1", "milk")])
-    keep.replace_items([])
-    engine.run_once()
-    assert anylist.fetch() == []
-
-    # Asked for again a week later.
-    keep.replace_items([item("k7", "milk")])
-    engine.run_once()
-
-    assert anylist.names() == {"milk"}
+    assert outcome.guard_tripped

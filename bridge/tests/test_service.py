@@ -21,6 +21,7 @@ def settings():
         google_master_token="aas_et/fake",
         poll_interval_seconds=20.0,
         alert_webhook_url="",
+        dry_run=False,
     )
 
 

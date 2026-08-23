@@ -106,6 +106,11 @@ class FakeListClient:
         """Simulate a change made outside the bridge, keeping ids stable."""
         self._items = {i.id: i for i in items}
 
+    @property
+    def items(self) -> list[ListItem]:
+        """Current contents, for assertions about what survived."""
+        return list(self._items.values())
+
     def names(self) -> set[str]:
         return {i.name for i in self._items.values()}
 

@@ -53,7 +53,9 @@ class Settings(BaseSettings):
 
     # -- Behaviour ----------------------------------------------------------
     poll_interval_seconds: float = 20.0
-    dry_run: bool = False
+    # Defaults on. Writing to a real shopping list should be switched on
+    # deliberately, once a dry run has been read.
+    dry_run: bool = True
     state_path: str = Field(default_factory=lambda: str(default_state_dir() / "state.sqlite"))
     keep_state_path: str = Field(
         default_factory=lambda: str(default_state_dir() / "keep_state.json")

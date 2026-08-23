@@ -143,4 +143,5 @@ def test_the_example_env_still_carries_the_non_secret_defaults(tmp_path, monkeyp
 
     assert settings.anylist_list == "Grocery"
     assert settings.keep_note_title == "Shopping list"
-    assert settings.dry_run is False
+    # Ships safe: writing is opt-in, after a plan has been read.
+    assert settings.dry_run is True

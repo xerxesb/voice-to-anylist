@@ -29,6 +29,9 @@ def bridge(sidecar):
         google_master_token="aas_et/fake",
         anylist_api_url=sidecar,
         anylist_list="Grocery",
+        # Explicit: DRY_RUN ships on, and these stories are about what the
+        # bridge actually writes.
+        dry_run=False,
     )
     service = BridgeService(settings, keep=keep, anylist=anylist, store=store)
     service.alerter.send = lambda key, message: None  # type: ignore[method-assign]
@@ -97,8 +100,10 @@ def test_checking_an_item_off_in_anylist_clears_it_from_the_note(bridge):
     bridge.anylist.set_checked(item_id, True)
     bridge.run_cycle()
 
-    ticked = next(i for i in bridge.keep.fetch() if i.name == "strawberries")
-    assert ticked.checked is True
+    # It leaves the note rather than lingering as a ticked line: the note
+    # shows what is still wanted, and crossed-off rows are history that lives
+    # on the AnyList side only.
+    assert "strawberries" not in {i.name for i in bridge.keep.fetch()}
 
 
 def test_saying_it_again_revives_the_old_item_instead_of_duplicating(bridge):

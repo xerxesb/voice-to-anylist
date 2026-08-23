@@ -1,9 +1,23 @@
-"""Three-way merge between the Keep note, the AnyList list, and the shadow.
+"""Project AnyList's active items onto the Keep note, and collect voice adds.
 
-Each side is compared against the shadow -- the last state both sides agreed
-on -- rather than against each other.  That is what distinguishes a genuinely
-new item from one the bridge itself wrote a moment ago, and it is the only
-reason this can run in a loop without echoing.
+AnyList is the master.  The Keep note is two things at once: a projection of
+AnyList's *unchecked* items, and an inbox for lines the speakers write into it.
+Nothing else about the note is authoritative.
+
+The asymmetry is the whole design.  The real list is a catalogue -- 1422 of its
+1432 rows are crossed off, meaning "we buy this, not right now" -- so a
+symmetric mirror reads it as 1422 items to replicate into a Keep note and a few
+hundred duplicates to collapse.  Both are catastrophic and both are what a
+mirror is supposed to do.  Hence two invariants:
+
+* A crossed-off AnyList row is never copied to Keep, never deduped, never
+  deleted, and never modified except by a revive.
+* The bridge never deletes an AnyList row.  The only removal it may emit on
+  that side is collapsing a duplicate among *active* items.
+
+The shadow -- the last state both sides agreed on -- still distinguishes a
+genuinely new Keep line from one the bridge itself wrote, which is what lets
+this run in a loop without echoing.
 """
 
 from __future__ import annotations
@@ -21,11 +35,12 @@ KEEP = "keep"
 ANYLIST = "anylist"
 
 _GUARD_SIGNATURE = "guard_signature"
+_BOOTSTRAPPED = "bootstrapped"
 
 
 @dataclass(frozen=True)
 class Action:
-    """One mutation on one side.  Kept declarative so it can be vetted first."""
+    """One mutation on one side.  Declarative, so it can be vetted first."""
 
     side: str
     kind: str  # add | remove | check | quantity | dedupe
@@ -41,7 +56,8 @@ class Action:
         if self.kind in {"remove", "dedupe"}:
             return f"{self.side}: {self.kind} {self.key!r}"
         if self.kind == "check":
-            return f"{self.side}: {'check' if self.checked else 'uncheck'} {self.key!r}"
+            verb = "mark purchased" if self.checked else "revive"
+            return f"{self.side}: {verb} {self.key!r}"
         return f"{self.side}: set quantity of {self.key!r} to {self.quantity}"
 
 
@@ -61,6 +77,7 @@ class SyncOutcome:
     guard_tripped: bool = False
     guard_reason: str | None = None
     dry_run: bool = False
+    bootstrapped: bool = False
 
     @property
     def changed(self) -> bool:
@@ -72,23 +89,22 @@ class _KeyPlan:
     key: str
     actions: list[Action]
     shadow: ShadowEntry | None
-    deletes_propagated: int = 0
+    destructive: int = 0
 
 
-def _index(
+def _index_active(
     items: list[ListItem], shadow_ids: set[str]
 ) -> tuple[dict[str, ListItem], list[ListItem]]:
-    """Group a side's items by normalised key, picking one winner per key.
+    """Group *unchecked* items by key, picking one winner each.
 
-    Both sides can genuinely end up holding two lines for the same thing --
-    Google appends "strawberries" without noticing the ticked "strawberry"
-    already sitting there.  An unchecked item wins, because a fresh request
-    beats a completed one; a tie goes to whichever is already mapped in the
-    shadow, so identity stays stable across cycles.  Everything else is
-    reported as a duplicate for removal.
+    A tie goes to whichever is already mapped in the shadow, so identity stays
+    stable across cycles.  The losers are duplicates to collapse -- and because
+    only unchecked items reach here, a crossed-off row can never be one.
     """
     grouped: dict[str, list[ListItem]] = {}
     for item in items:
+        if item.checked:
+            continue
         item_key = normalise_key(item.name)
         if not item_key:
             continue
@@ -97,31 +113,22 @@ def _index(
     canonical: dict[str, ListItem] = {}
     duplicates: list[ListItem] = []
     for item_key, candidates in grouped.items():
-        if len(candidates) == 1:
-            canonical[item_key] = candidates[0]
-            continue
-        candidates.sort(key=lambda i: (i.checked, i.id not in shadow_ids, i.id))
+        candidates.sort(key=lambda i: (i.id not in shadow_ids, i.id))
         canonical[item_key] = candidates[0]
         duplicates.extend(candidates[1:])
     return canonical, duplicates
 
 
-def _resolve(current_a, current_b, baseline):
-    """Pick a winner for a single field given both sides and their baseline.
-
-    Returns ``(value, changed_a, changed_b)`` where the ``changed_*`` flags say
-    which side must be written to.  When both sides moved and disagree, side
-    ``b`` -- AnyList -- wins, as the system of record for meal planning.
-    """
-    a_moved = current_a != baseline
-    b_moved = current_b != baseline
-    if a_moved and not b_moved:
-        return current_a, False, True
-    if b_moved and not a_moved:
-        return current_b, True, False
-    if a_moved and b_moved and current_a != current_b:
-        return current_b, True, False
-    return current_b if b_moved else baseline, False, False
+def _index_history(items: list[ListItem]) -> dict[str, ListItem]:
+    """Crossed-off rows by key, for reviving.  Never a candidate for deletion."""
+    history: dict[str, ListItem] = {}
+    for item in items:
+        if not item.checked:
+            continue
+        item_key = normalise_key(item.name)
+        if item_key and item_key not in history:
+            history[item_key] = item
+    return history
 
 
 class SyncEngine:
@@ -146,22 +153,41 @@ class SyncEngine:
         self,
         item_key: str,
         keep_item: ListItem | None,
-        anylist_item: ListItem | None,
+        active: ListItem | None,
+        history: ListItem | None,
         shadow: ShadowEntry | None,
     ) -> _KeyPlan:
         actions: list[Action] = []
 
-        # Gone from both sides: nothing to do but forget it.
-        if keep_item is None and anylist_item is None:
-            return _KeyPlan(item_key, actions, None)
-
-        # Present on one side only.
-        if anylist_item is None:
-            assert keep_item is not None
-            if shadow is not None:
-                # It was mapped, so AnyList losing it is a real deletion.
-                actions.append(Action(KEEP, "remove", item_key, item_id=keep_item.id))
-                return _KeyPlan(item_key, actions, None, deletes_propagated=1)
+        # -- the voice inbox: an *unmapped* line with nothing active behind it.
+        # Unmapped is what makes it a voice add; a mapped line with no active
+        # row behind it means the master crossed it off, handled below.
+        if (
+            keep_item is not None
+            and not keep_item.checked
+            and active is None
+            and shadow is None
+        ):
+            if history is not None:
+                # Revive rather than append: one row per thing, ticked meaning
+                # "not needed right now".
+                actions.append(
+                    Action(
+                        ANYLIST, "check", item_key, item_id=history.id, checked=False
+                    )
+                )
+                return _KeyPlan(
+                    item_key,
+                    actions,
+                    ShadowEntry(
+                        key=item_key,
+                        keep_id=keep_item.id,
+                        anylist_id=history.id,
+                        name=history.name,
+                        quantity=keep_item.quantity,
+                        checked=False,
+                    ),
+                )
             actions.append(
                 Action(
                     ANYLIST,
@@ -169,7 +195,7 @@ class SyncEngine:
                     item_key,
                     name=keep_item.name,
                     quantity=keep_item.quantity,
-                    checked=keep_item.checked,
+                    checked=False,
                 )
             )
             return _KeyPlan(
@@ -181,22 +207,38 @@ class SyncEngine:
                     anylist_id=None,  # filled in once the add returns an id
                     name=keep_item.name,
                     quantity=keep_item.quantity,
-                    checked=keep_item.checked,
+                    checked=False,
                 ),
             )
 
+        # -- nothing active on the master: the note must not show it
+        if active is None:
+            if keep_item is not None:
+                actions.append(Action(KEEP, "remove", item_key, item_id=keep_item.id))
+            return _KeyPlan(item_key, actions, None)
+
+        # -- active on the master, ticked or gone from the note: purchased
+        gone_from_note = keep_item is None and shadow is not None
+        if (keep_item is not None and keep_item.checked) or gone_from_note:
+            actions.append(
+                Action(ANYLIST, "check", item_key, item_id=active.id, checked=True)
+            )
+            if keep_item is not None:
+                actions.append(Action(KEEP, "remove", item_key, item_id=keep_item.id))
+            # Marking the master purchased in bulk is this model's destructive
+            # act, so it is what the guard counts.
+            return _KeyPlan(item_key, actions, None, destructive=1)
+
+        # -- active on the master, absent from the note: project it
         if keep_item is None:
-            if shadow is not None:
-                actions.append(Action(ANYLIST, "remove", item_key, item_id=anylist_item.id))
-                return _KeyPlan(item_key, actions, None, deletes_propagated=1)
             actions.append(
                 Action(
                     KEEP,
                     "add",
                     item_key,
-                    name=anylist_item.name,
-                    quantity=anylist_item.quantity,
-                    checked=anylist_item.checked,
+                    name=active.name,
+                    quantity=active.quantity,
+                    checked=False,
                 )
             )
             return _KeyPlan(
@@ -204,46 +246,33 @@ class SyncEngine:
                 actions,
                 ShadowEntry(
                     key=item_key,
-                    keep_id=None,
-                    anylist_id=anylist_item.id,
-                    name=anylist_item.name,
-                    quantity=anylist_item.quantity,
-                    checked=anylist_item.checked,
+                    keep_id=None,  # filled in once the add returns an id
+                    anylist_id=active.id,
+                    name=active.name,
+                    quantity=active.quantity,
+                    checked=False,
                 ),
             )
 
-        # Present on both sides: reconcile the fields that matter.  Display
-        # names are deliberately left alone -- "Strawberries" and "strawberry"
-        # share a key, and fighting over the spelling would churn forever.
-        base_checked = shadow.checked if shadow else anylist_item.checked or keep_item.checked
-        base_quantity = shadow.quantity if shadow else anylist_item.quantity
-
-        checked, write_keep_checked, write_any_checked = _resolve(
-            keep_item.checked, anylist_item.checked, base_checked
-        )
-        quantity, write_keep_qty, write_any_qty = _resolve(
-            keep_item.quantity, anylist_item.quantity, base_quantity
-        )
-
-        if shadow is None:
-            # Adopting an unmapped pair: no baseline, so a fresh request beats
-            # a completed one and a stated quantity beats a missing one.
-            checked = keep_item.checked and anylist_item.checked
-            write_keep_checked = keep_item.checked != checked
-            write_any_checked = anylist_item.checked != checked
-            quantity = anylist_item.quantity or keep_item.quantity
-            write_keep_qty = keep_item.quantity != quantity
-            write_any_qty = anylist_item.quantity != quantity
-
-        if write_keep_checked:
-            actions.append(
-                Action(KEEP, "check", item_key, item_id=keep_item.id, checked=checked)
-            )
-        if write_any_checked:
-            actions.append(
-                Action(ANYLIST, "check", item_key, item_id=anylist_item.id, checked=checked)
-            )
-        if write_keep_qty:
+        # -- present and active on both: reconcile quantity, master wins.
+        # Display names are left alone; "Strawberries" and "strawberry" share a
+        # key, and fighting over the spelling would churn forever.
+        quantity = active.quantity
+        if shadow is not None and keep_item.quantity != shadow.quantity:
+            # The note moved and the master did not: accept the spoken quantity.
+            if active.quantity == shadow.quantity:
+                quantity = keep_item.quantity
+                actions.append(
+                    Action(
+                        ANYLIST,
+                        "quantity",
+                        item_key,
+                        item_id=active.id,
+                        name=active.name,
+                        quantity=quantity,
+                    )
+                )
+        if keep_item.quantity != quantity and not actions:
             actions.append(
                 Action(
                     KEEP,
@@ -254,17 +283,6 @@ class SyncEngine:
                     quantity=quantity,
                 )
             )
-        if write_any_qty:
-            actions.append(
-                Action(
-                    ANYLIST,
-                    "quantity",
-                    item_key,
-                    item_id=anylist_item.id,
-                    name=anylist_item.name,
-                    quantity=quantity,
-                )
-            )
 
         return _KeyPlan(
             item_key,
@@ -272,12 +290,55 @@ class SyncEngine:
             ShadowEntry(
                 key=item_key,
                 keep_id=keep_item.id,
-                anylist_id=anylist_item.id,
-                name=anylist_item.name,
+                anylist_id=active.id,
+                name=active.name,
                 quantity=quantity,
-                checked=checked,
+                checked=False,
             ),
         )
+
+    def _plan_bootstrap(
+        self, keep_items: list[ListItem], active: dict[str, ListItem]
+    ) -> list[_KeyPlan]:
+        """First contact: assert the master, and write nothing to it.
+
+        With an empty shadow there is no basis for telling a fresh voice add
+        from a leftover line, so rather than guess, the note is replaced with
+        exactly the master's active set.
+        """
+        plans = [
+            _KeyPlan(
+                normalise_key(k.name) or k.id,
+                [Action(KEEP, "remove", normalise_key(k.name) or k.id, item_id=k.id)],
+                None,
+            )
+            for k in keep_items
+        ]
+        for item_key, item in sorted(active.items()):
+            plans.append(
+                _KeyPlan(
+                    item_key,
+                    [
+                        Action(
+                            KEEP,
+                            "add",
+                            item_key,
+                            name=item.name,
+                            quantity=item.quantity,
+                            checked=False,
+                        )
+                    ],
+                    ShadowEntry(
+                        key=item_key,
+                        keep_id=None,
+                        anylist_id=item.id,
+                        name=item.name,
+                        quantity=item.quantity,
+                        checked=False,
+                    ),
+                )
+            )
+        return plans
 
     # -- guard --------------------------------------------------------------
 
@@ -286,54 +347,55 @@ class SyncEngine:
         plans: list[_KeyPlan],
         shadow: dict[str, ShadowEntry],
         keep_count: int,
-        anylist_count: int,
+        active_count: int,
     ) -> str | None:
         """Return a reason to abort this cycle, or None to proceed.
 
-        The same mass change seen on two consecutive cycles is allowed through:
-        a real "clear the list" persists, whereas a transient fetch failure
-        does not.  That way the guard delays a legitimate purge by one cycle
-        instead of blocking it forever.
+        The same mass change on two consecutive cycles is allowed through: a
+        real "I bought all of it" persists, a transient fetch failure does not.
+        So the guard delays a legitimate purge by one cycle rather than
+        blocking it forever.
         """
-        # A dry run must leave no trace, including the confirm-on-repeat
-        # signature -- otherwise it would silently arm the next real cycle.
+
         def remember(value: str | None) -> None:
+            # A dry run must leave no trace, including the confirm-on-repeat
+            # signature -- otherwise it silently arms the next real cycle.
             if not self.dry_run:
                 self.store.set_meta(_GUARD_SIGNATURE, value)
 
-        deleting = sorted(p.key for p in plans if p.deletes_propagated)
-        if not deleting:
+        purchasing = sorted(p.key for p in plans if p.destructive)
+        if not purchasing:
             remember(None)
             return None
 
         reason: str | None = None
-        if (
-            len(shadow) >= self.guard.empty_side_min_shadow
-            and (keep_count == 0) != (anylist_count == 0)
-        ):
-            empty = KEEP if keep_count == 0 else ANYLIST
-            reason = f"{empty} returned an empty list while {len(shadow)} items were mapped"
+        if len(shadow) >= self.guard.empty_side_min_shadow and keep_count == 0:
+            reason = (
+                f"the note came back empty while {len(shadow)} items were mapped; "
+                "that would mark every active item purchased"
+            )
         elif (
-            len(deleting) >= self.guard.min_deletes
+            len(purchasing) >= self.guard.min_deletes
             and shadow
-            and len(deleting) / len(shadow) > self.guard.max_ratio
+            and len(purchasing) / len(shadow) > self.guard.max_ratio
         ):
             reason = (
-                f"{len(deleting)} of {len(shadow)} mapped items would be deleted"
-                f" (over {self.guard.max_ratio:.0%})"
+                f"{len(purchasing)} of {len(shadow)} mapped items would be marked "
+                f"purchased (over {self.guard.max_ratio:.0%})"
             )
 
         if reason is None:
             remember(None)
             return None
 
-        signature = "\n".join(deleting)
+        signature = "\n".join(purchasing)
         if self.store.get_meta(_GUARD_SIGNATURE) == signature:
             log.warning("guard: allowing repeated mass change (%s)", reason)
             remember(None)
             return None
 
         remember(signature)
+        _ = active_count  # reported by the service, not used to decide
         return reason
 
     # -- execution ----------------------------------------------------------
@@ -366,39 +428,54 @@ class SyncEngine:
         keep_items = self.keep.fetch()
         anylist_items = self.anylist.fetch()
 
-        keep_index, keep_dupes = _index(
-            keep_items, {e.keep_id for e in shadow.values() if e.keep_id}
-        )
-        anylist_index, anylist_dupes = _index(
+        active, active_dupes = _index_active(
             anylist_items, {e.anylist_id for e in shadow.values() if e.anylist_id}
         )
+        history = _index_history(anylist_items)
+        keep_index, keep_dupes = _index_active(
+            keep_items, {e.keep_id for e in shadow.values() if e.keep_id}
+        )
+        # A ticked Keep line is a purchase signal, so unlike the master's
+        # crossed-off rows it still has to be looked at.
+        for item in keep_items:
+            item_key = normalise_key(item.name)
+            if item.checked and item_key and item_key not in keep_index:
+                keep_index[item_key] = item
 
-        plans: list[_KeyPlan] = []
-        for item_key in sorted(set(keep_index) | set(anylist_index) | set(shadow)):
-            plans.append(
+        outcome = SyncOutcome(dry_run=self.dry_run)
+
+        if not shadow and self.store.get_meta(_BOOTSTRAPPED) is None:
+            plans = self._plan_bootstrap(keep_items, active)
+            outcome.bootstrapped = True
+            active_dupes = []
+            keep_dupes = []
+        else:
+            plans = [
                 self._plan_key(
                     item_key,
                     keep_index.get(item_key),
-                    anylist_index.get(item_key),
+                    active.get(item_key),
+                    history.get(item_key),
                     shadow.get(item_key),
                 )
-            )
+                for item_key in sorted(set(keep_index) | set(active) | set(shadow))
+            ]
 
-        # Collapsing same-side duplicates never crosses the mirror, so it is
-        # excluded from the deletion guard.
+        # Collapsing same-side duplicates is not a purge, so it sits outside
+        # the guard -- and only unchecked items ever reach here.
         dedupe_actions = [
             Action(side, "dedupe", normalise_key(item.name), item_id=item.id)
-            for side, dupes in ((KEEP, keep_dupes), (ANYLIST, anylist_dupes))
+            for side, dupes in ((KEEP, keep_dupes), (ANYLIST, active_dupes))
             for item in dupes
         ]
 
-        outcome = SyncOutcome(dry_run=self.dry_run)
         outcome.actions = [a for p in plans for a in p.actions] + dedupe_actions
 
-        reason = self._check_guard(plans, shadow, len(keep_items), len(anylist_items))
+        reason = self._check_guard(plans, shadow, len(keep_items), len(active))
         if reason is not None:
             outcome.guard_tripped = True
             outcome.guard_reason = reason
+            outcome.actions = []
             log.error("guard tripped, skipping cycle: %s", reason)
             return outcome
 
@@ -406,6 +483,8 @@ class SyncEngine:
             # Still rewrite the shadow: ids can change under us even when the
             # visible contents have not.
             self.store.replace_all([p.shadow for p in plans if p.shadow])
+            if outcome.bootstrapped and not self.dry_run:
+                self.store.set_meta(_BOOTSTRAPPED, "1")
             return outcome
 
         for action in outcome.actions:
@@ -425,5 +504,7 @@ class SyncEngine:
         self.keep.commit()
         self.anylist.commit()
         self.store.replace_all(entries)
+        if outcome.bootstrapped:
+            self.store.set_meta(_BOOTSTRAPPED, "1")
         outcome.applied = True
         return outcome
