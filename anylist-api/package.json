@@ -1,0 +1,17 @@
+{
+  "name": "anylist-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Loopback-only REST facade over the unofficial AnyList client",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "anylist": "^0.8.6",
+    "express": "^4.19.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

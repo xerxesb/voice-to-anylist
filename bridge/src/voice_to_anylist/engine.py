@@ -366,7 +366,9 @@ class SyncEngine:
         keep_items = self.keep.fetch()
         anylist_items = self.anylist.fetch()
 
-        keep_index, keep_dupes = _index(keep_items, {e.keep_id for e in shadow.values() if e.keep_id})
+        keep_index, keep_dupes = _index(
+            keep_items, {e.keep_id for e in shadow.values() if e.keep_id}
+        )
         anylist_index, anylist_dupes = _index(
             anylist_items, {e.anylist_id for e in shadow.values() if e.anylist_id}
         )
