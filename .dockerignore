@@ -1,0 +1,15 @@
+.git
+.github
+.venv
+venv
+**/node_modules
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.ruff_cache
+data
+.env
+*.sqlite
+*.sqlite3
+docs
+README.md
