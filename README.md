@@ -44,8 +44,13 @@ ticking an item off in the AnyList app clears it from the note.
 
 ## Getting started
 
-See **[docs/SETUP.md](docs/SETUP.md)**. The Keep note has to be created and
-shared before anything else matters.
+> **Not yet deployed.** Start with
+> **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** — it records what is verified,
+> what is not (the Docker image has never been built), and the four small
+> changes outstanding before first run.
+
+See **[docs/SETUP.md](docs/SETUP.md)** for the detail. The Keep note has to be
+created and shared before anything else matters.
 
 ```bash
 cp .env.example .env          # fill in credentials
