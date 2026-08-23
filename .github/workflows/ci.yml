@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # The sidecar contract and end-to-end tests skip themselves without
+      # node and an installed anylist-api.  Skipping is exactly what must not
+      # happen in CI -- the Python/Node seam is the likeliest place for a
+      # silent mismatch.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e './bridge[dev]'
+          npm install --prefix anylist-api --no-audit --no-fund
+
+      - name: Lint
+        run: ruff check bridge/
+
+      # CI=true (set by Actions) makes conftest fail rather than skip if the
+      # node side is missing, so the seam is never quietly untested.
+      - name: Test
+        working-directory: bridge
+        run: pytest -q
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # install.sh is now the artifact that can break a deployment, so it gets
+      # the same treatment the Dockerfile never did.
+      - name: ShellCheck
+        run: |
+          sudo apt-get update && sudo apt-get install -y shellcheck
+          shellcheck deploy/macos/install.sh deploy/macos/uninstall.sh deploy/macos/vta
+
+      - name: Validate the launchd plists
+        run: |
+          sudo apt-get install -y libxml2-utils
+          for f in deploy/macos/*.plist.in; do
+            sed -e 's|__REPO_DIR__|/repo|g' -e 's|__STATE_DIR__|/state|g' \
+                -e 's|__RUNTIME_DIR__|/state/runtime|g' -e 's|__LOG_DIR__|/state/logs|g' \
+                -e 's|__ENV_FILE__|/state/.env|g' "$f" > /tmp/rendered.plist
+            xmllint --noout /tmp/rendered.plist
+            echo "ok $f"
+          done

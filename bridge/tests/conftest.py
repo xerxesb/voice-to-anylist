@@ -67,10 +67,24 @@ def settled(keep, anylist, engine):
 REPO_ROOT = Path(__file__).resolve().parents[2]
 STUB_SERVER = REPO_ROOT / "anylist-api" / "test" / "serve-stub.js"
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("node") is None or not (REPO_ROOT / "anylist-api" / "node_modules").exists(),
-    reason="needs node and `npm install` in anylist-api/",
-)
+
+
+def _require_node() -> str:
+    """The node interpreter, or skip -- except in CI, where skipping is a lie.
+
+    A `pytestmark` in a conftest does not apply to other modules, so the
+    previous guard here never actually skipped anything; the tests errored
+    instead.  Doing it in the fixture puts the check where the dependency is.
+    """
+    node = shutil.which("node")
+    if node and (REPO_ROOT / "anylist-api" / "node_modules").exists():
+        return node
+    reason = "needs node and `npm install --prefix anylist-api`"
+    # Silently skipping the Python/Node seam in CI defeats the point of having
+    # a test for it: that seam is the likeliest place for a silent mismatch.
+    if os.environ.get("CI"):
+        pytest.fail(reason)
+    pytest.skip(reason)
 
 
 def _free_port() -> int:
@@ -85,7 +99,7 @@ def _start_sidecar(port: int, **env) -> subprocess.Popen:
     # interpreter outside /usr/bin -- Homebrew on Apple Silicon, or the pinned
     # runtime the macOS install script lays down -- fails the whole module.
     return subprocess.Popen(
-        [shutil.which("node"), str(STUB_SERVER)],
+        [_require_node(), str(STUB_SERVER)],
         env={"PATH": os.environ.get("PATH", ""), "ANYLIST_API_PORT": str(port), **env},
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The Node facade over the unofficial AnyList client, on loopback only.
+
+  It reads the shared .env through Node's own --env-file, so credentials live
+  in one file rather than being duplicated into this plist.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.xerxesb.voice-to-anylist.sidecar</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__RUNTIME_DIR__/node/bin/node</string>
+    <string>--env-file-if-exists=__ENV_FILE__</string>
+    <string>__REPO_DIR__/anylist-api/server.js</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>ANYLIST_API_HOST</key>
+    <string>127.0.0.1</string>
+    <key>ANYLIST_API_PORT</key>
+    <string>3000</string>
+    <key>ANYLIST_CREDENTIALS_FILE</key>
+    <string>__STATE_DIR__/.anylist_credentials</string>
+    <key>VTA_STATE_DIR</key>
+    <string>__STATE_DIR__</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__STATE_DIR__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <!-- Load without a GUI session, matching the syncthing agent already on
+       this host.  A bridge that only polls while someone is looking at the
+       screen is no use. -->
+  <key>LimitLoadToSessionType</key>
+  <array>
+    <string>Aqua</string>
+    <string>Background</string>
+    <string>LoginWindow</string>
+    <string>StandardIO</string>
+    <string>System</string>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/sidecar.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/sidecar.log</string>
+</dict>
+</plist>

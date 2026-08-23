@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The Python bridge: polls Keep, merges, writes AnyList, reports on :8080.
+
+  WorkingDirectory is the state directory because pydantic-settings resolves
+  .env relative to the working directory -- that is how this job finds the same
+  credentials file the sidecar reads.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.xerxesb.voice-to-anylist.bridge</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__RUNTIME_DIR__/venv/bin/voice-to-anylist</string>
+    <string>run</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>VTA_STATE_DIR</key>
+    <string>__STATE_DIR__</string>
+    <key>PATH</key>
+    <string>__RUNTIME_DIR__/venv/bin:__RUNTIME_DIR__/node/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>WorkingDirectory</key>
+  <string>__STATE_DIR__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>LimitLoadToSessionType</key>
+  <array>
+    <string>Aqua</string>
+    <string>Background</string>
+    <string>LoginWindow</string>
+    <string>StandardIO</string>
+    <string>System</string>
+  </array>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/bridge.log</string>
+</dict>
+</plist>
