@@ -3,8 +3,10 @@
 <!--
   The Node facade over the unofficial AnyList client, on loopback only.
 
-  It reads the shared .env through Node's own env-file flag, so credentials live
-  in one file rather than being duplicated into this plist.
+  Launched through voice-to-anylist-sidecar rather than node directly: the
+  bridge and the sidecar share one .env, and Node's own env-file parser
+  disagrees with python-dotenv about an unquoted '#', truncating the value.
+  One parser reads the file and hands this process a plain environment.
 -->
 <plist version="1.0">
 <dict>
@@ -13,8 +15,8 @@
 
   <key>ProgramArguments</key>
   <array>
+    <string>__RUNTIME_DIR__/venv/bin/voice-to-anylist-sidecar</string>
     <string>__RUNTIME_DIR__/node/bin/node</string>
-    <string>--env-file-if-exists=__ENV_FILE__</string>
     <string>__REPO_DIR__/anylist-api/server.js</string>
   </array>
 

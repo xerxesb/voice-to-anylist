@@ -55,7 +55,7 @@ jobs:
           for f in deploy/macos/*.plist.in; do
             sed -e 's|__REPO_DIR__|/repo|g' -e 's|__STATE_DIR__|/state|g' \
                 -e 's|__RUNTIME_DIR__|/state/runtime|g' -e 's|__LOG_DIR__|/state/logs|g' \
-                -e 's|__ENV_FILE__|/state/.env|g' "$f" > /tmp/rendered.plist
+                "$f" > /tmp/rendered.plist
             xmllint --noout /tmp/rendered.plist
             echo "ok $f"
           done

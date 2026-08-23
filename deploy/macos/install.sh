@@ -149,7 +149,6 @@ render() {
       -e "s|__STATE_DIR__|$STATE_DIR|g" \
       -e "s|__RUNTIME_DIR__|$RUNTIME_DIR|g" \
       -e "s|__LOG_DIR__|$LOG_DIR|g" \
-      -e "s|__ENV_FILE__|$ENV_FILE|g" \
       "$1" > "$2"
 }
 
