@@ -4,6 +4,7 @@ The loop has to outlive every failure an unofficial API can produce, while
 still making a genuine outage visible.
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -136,3 +137,57 @@ def test_health_goes_bad_when_syncing_has_silently_stopped(service, keep):
 
 def test_health_tolerates_a_slow_first_cycle(service):
     assert service.healthy()
+
+
+def test_a_cycle_can_run_on_a_worker_thread(service, keep):
+    """run_forever dispatches each cycle with asyncio.to_thread.
+
+    The shadow store's SQLite connection therefore outlives the thread that
+    opened it, and would refuse to be used from another one unless it is
+    explicitly built to allow it.
+    """
+    keep.replace_items([item("k1", "milk")])
+
+    asyncio.run(asyncio.to_thread(service.run_cycle))
+
+    assert service.status.consecutive_failures == 0, service.status.last_error
+    assert service.status.last_success is not None
+
+
+def test_consecutive_cycles_on_different_threads_stay_consistent(service, keep):
+    keep.replace_items([item("k1", "milk")])
+
+    async def two_cycles():
+        await asyncio.to_thread(service.run_cycle)
+        await asyncio.to_thread(service.run_cycle)
+
+    asyncio.run(two_cycles())
+
+    assert service.status.consecutive_failures == 0, service.status.last_error
+    assert service.status.cycles == 2
+
+
+def test_status_and_health_endpoints_report_the_service(service, keep):
+    """The operator-facing surface: is it working, and if not, why."""
+    from voice_to_anylist.service import create_app
+
+    keep.replace_items([item("k1", "milk")])
+    service.run_cycle()
+
+    routes = {r.path: r.endpoint for r in create_app(service).routes if hasattr(r, "endpoint")}
+
+    assert routes["/healthz"]().status_code == 200
+
+    status = routes["/status"]()
+    assert status["config"]["anylist_list"] == "Grocery"
+    assert status["cycles"] == 1
+    assert status["last_success"] is not None
+
+
+def test_health_endpoint_reports_503_once_syncing_has_stopped(service):
+    from voice_to_anylist.service import create_app
+
+    service.status.last_success = datetime.now(UTC) - timedelta(hours=2)
+    routes = {r.path: r.endpoint for r in create_app(service).routes if hasattr(r, "endpoint")}
+
+    assert routes["/healthz"]().status_code == 503

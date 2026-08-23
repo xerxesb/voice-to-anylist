@@ -338,3 +338,60 @@ def test_dry_run_does_not_arm_the_guards_confirm_on_repeat(keep, anylist, store,
     assert SyncEngine(keep, anylist, store, dry_run=True).run_once().guard_tripped
     assert SyncEngine(keep, anylist, store).run_once().guard_tripped
     assert len(anylist.fetch()) == 4
+
+
+def test_cold_start_prefers_wanting_an_item_over_having_bought_it(engine, keep, anylist):
+    """With no shadow there is no baseline, so the tie has to be broken by policy.
+
+    Losing a "please buy this" is a real failure; losing a "already bought" is
+    a minor annoyance. So the unticked side wins.
+    """
+    keep.replace_items([item("k1", "milk", checked=False)])
+    anylist.replace_items([item("a1", "milk", checked=True)])
+
+    engine.run_once()
+
+    assert anylist.by_name("milk").checked is False
+    assert keep.by_name("milk").checked is False
+
+
+def test_cold_start_keeps_an_item_ticked_when_both_sides_agree(engine, keep, anylist):
+    keep.replace_items([item("k1", "milk", checked=True)])
+    anylist.replace_items([item("a1", "milk", checked=True)])
+
+    engine.run_once()
+
+    assert anylist.by_name("milk").checked is True
+    assert keep.by_name("milk").checked is True
+
+
+def test_cold_start_adopts_a_quantity_from_whichever_side_states_one(engine, keep, anylist):
+    keep.replace_items([item("k1", "lemons")])
+    anylist.replace_items([item("a1", "lemons", quantity="6")])
+
+    engine.run_once()
+
+    assert keep.by_name("lemons").quantity == "6"
+
+
+def test_renaming_an_item_in_the_app_replaces_it_on_the_note(engine, keep, anylist, settled):
+    """A rename changes the identity, so it reads as a delete plus an add."""
+    settled([item("k1", "milk")], [item("a1", "milk")])
+
+    anylist.replace_items([item("a1", "almond milk")])
+    engine.run_once()
+
+    assert keep.names() == {"almond milk"}
+
+
+def test_an_item_reappearing_after_deletion_is_added_back(engine, keep, anylist, settled):
+    settled([item("k1", "milk")], [item("a1", "milk")])
+    keep.replace_items([])
+    engine.run_once()
+    assert anylist.fetch() == []
+
+    # Asked for again a week later.
+    keep.replace_items([item("k7", "milk")])
+    engine.run_once()
+
+    assert anylist.names() == {"milk"}

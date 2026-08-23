@@ -11,6 +11,7 @@ import asyncio
 import logging
 import random
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -205,7 +206,18 @@ class BridgeService:
 
 
 def create_app(service: BridgeService) -> FastAPI:
-    app = FastAPI(title="voice-to-anylist", docs_url=None, redoc_url=None)
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        task = asyncio.create_task(service.run_forever())
+        try:
+            yield
+        finally:
+            task.cancel()
+            service.close()
+
+    app = FastAPI(
+        title="voice-to-anylist", docs_url=None, redoc_url=None, lifespan=lifespan
+    )
 
     @app.get("/healthz")
     def healthz() -> JSONResponse:
@@ -226,16 +238,5 @@ def create_app(service: BridgeService) -> FastAPI:
             },
             **service.status.as_dict(),
         }
-
-    @app.on_event("startup")
-    async def _start() -> None:
-        app.state.task = asyncio.create_task(service.run_forever())
-
-    @app.on_event("shutdown")
-    async def _stop() -> None:
-        task = getattr(app.state, "task", None)
-        if task:
-            task.cancel()
-        service.close()
 
     return app

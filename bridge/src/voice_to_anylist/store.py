@@ -9,6 +9,7 @@ other is what makes the merge decidable.
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterable
 from contextlib import closing
 from dataclasses import dataclass
@@ -51,16 +52,22 @@ class ShadowStore:
         self.path = str(path)
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self.path)
+        # Each sync cycle runs on a worker thread from asyncio's pool, so the
+        # connection outlives the thread that opened it and cannot be pinned to
+        # it. Access is serialised by the lock below instead.
+        self._conn = sqlite3.connect(self.path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+        self._lock = threading.Lock()
+        with self._lock:
+            self._conn.executescript(_SCHEMA)
+            self._conn.commit()
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     def load(self) -> dict[str, ShadowEntry]:
-        with closing(self._conn.execute("SELECT * FROM shadow")) as cursor:
+        with self._lock, closing(self._conn.execute("SELECT * FROM shadow")) as cursor:
             return {
                 row["key"]: ShadowEntry(
                     key=row["key"],
@@ -83,7 +90,7 @@ class ShadowStore:
             (e.key, e.keep_id, e.anylist_id, e.name, e.quantity, int(e.checked))
             for e in entries
         ]
-        with self._conn:
+        with self._lock, self._conn:
             self._conn.execute("DELETE FROM shadow")
             self._conn.executemany(
                 "INSERT INTO shadow (key, keep_id, anylist_id, name, quantity, checked)"
@@ -92,12 +99,14 @@ class ShadowStore:
             )
 
     def get_meta(self, key: str) -> str | None:
-        with closing(self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,))) as cur:
+        with self._lock, closing(
+            self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,))
+        ) as cur:
             row = cur.fetchone()
         return row["value"] if row else None
 
     def set_meta(self, key: str, value: str | None) -> None:
-        with self._conn:
+        with self._lock, self._conn:
             if value is None:
                 self._conn.execute("DELETE FROM meta WHERE key = ?", (key,))
             else:

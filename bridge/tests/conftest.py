@@ -1,3 +1,10 @@
+import shutil
+import socket
+import subprocess
+import time
+from pathlib import Path
+
+import httpx
 import pytest
 
 from voice_to_anylist.clients.base import FakeListClient, ListItem
@@ -52,3 +59,56 @@ def settled(keep, anylist, engine):
         anylist.calls.clear()
 
     return _settle
+
+
+# -- the Node sidecar, running against an in-memory stub of AnyList ----------
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+STUB_SERVER = REPO_ROOT / "anylist-api" / "test" / "serve-stub.js"
+
+pytestmark = pytest.mark.skipif(
+    shutil.which("node") is None or not (REPO_ROOT / "anylist-api" / "node_modules").exists(),
+    reason="needs node and `npm install` in anylist-api/",
+)
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@pytest.fixture(scope="module")
+def sidecar():
+    port = _free_port()
+    process = subprocess.Popen(
+        ["node", str(STUB_SERVER)],
+        env={
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "ANYLIST_API_PORT": str(port),
+            "ANYLIST_EMAIL": "test@example.com",
+            "ANYLIST_PASSWORD": "test",
+        },
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                output = (process.stdout.read() or b"").decode()
+                pytest.fail(f"sidecar exited early:\n{output}")
+            try:
+                if httpx.get(f"{base_url}/health", timeout=1).status_code == 200:
+                    break
+            except httpx.HTTPError:
+                time.sleep(0.2)
+        else:
+            pytest.fail("sidecar did not become healthy")
+        yield base_url
+    finally:
+        process.terminate()
+        process.wait(timeout=10)
+
+
