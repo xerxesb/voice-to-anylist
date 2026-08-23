@@ -154,10 +154,18 @@ render() {
 }
 
 reload() {
-  local label="$1" plist="$2"
+  label="$1"; plist="$2"; waited=0
   # bootout first: bootstrap on an already-loaded label is an error, and this
   # script's whole job is to be safe to re-run.
   launchctl bootout "gui/$UID/$label" 2>/dev/null || true
+  # bootout returns before the job has actually gone, so bootstrapping straight
+  # after it fails with "service already loaded" and, under set -e, leaves a
+  # redeploy half applied -- the old code still running under the new plist.
+  while launchctl print "gui/$UID/$label" >/dev/null 2>&1; do
+    waited=$((waited + 1))
+    [ "$waited" -gt 50 ] && die "$label will not unload; try: launchctl bootout gui/$UID/$label"
+    sleep 0.2
+  done
   launchctl bootstrap "gui/$UID" "$plist"
   launchctl enable "gui/$UID/$label"
 }
