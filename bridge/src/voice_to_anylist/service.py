@@ -18,12 +18,12 @@ from datetime import UTC, datetime
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from .alerts import Alerter
+from .alerts import ActivityNotifier, Alerter
 from .clients.anylist import AnyListClient
 from .clients.base import AuthenticationError, ListClientError
 from .clients.keep import KeepClient
 from .config import Settings
-from .engine import GuardConfig, SyncEngine
+from .engine import GuardConfig, SyncEngine, voice_additions
 from .store import ShadowStore
 
 log = logging.getLogger(__name__)
@@ -78,6 +78,7 @@ class BridgeService:
         self.settings = settings
         self.status = Status()
         self.alerter = Alerter(settings.alert_webhook_url)
+        self.activity = ActivityNotifier(settings.activity_webhook_url)
 
         self.store = store or ShadowStore(settings.state_path)
         self.keep = keep or KeepClient(
@@ -153,6 +154,9 @@ class BridgeService:
 
         if outcome.applied:
             self.status.actions_applied += len(outcome.actions)
+            # Only for a cycle that really wrote: a dry run announcing things
+            # that did not happen would be worse than silence.
+            self.activity.added(voice_additions(outcome.actions))
 
     def _record_failure(self, error: BaseException) -> None:
         self.status.consecutive_failures += 1

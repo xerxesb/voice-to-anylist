@@ -2,7 +2,7 @@
 
 import pytest
 
-from voice_to_anylist.alerts import Alerter
+from voice_to_anylist.alerts import ActivityNotifier, Alerter
 
 
 @pytest.fixture
@@ -58,3 +58,75 @@ def test_nothing_is_posted_when_no_webhook_is_configured(alerter):
     alerter.send("auth", "token expired")
 
     assert alerter.sent == []
+
+
+# -- activity, which is a different kind of message ---------------------------
+
+
+@pytest.fixture
+def notifier(monkeypatch):
+    posted = []
+    instance = ActivityNotifier(webhook_url="https://ntfy.example/activity")
+    monkeypatch.setattr(
+        "voice_to_anylist.alerts.httpx.post",
+        lambda url, **kwargs: posted.append((url, kwargs["content"].decode(), kwargs["headers"])),
+    )
+    instance.posted = posted
+    return instance
+
+
+def test_an_addition_is_announced(notifier):
+    notifier.added(["strawberries"])
+
+    assert len(notifier.posted) == 1
+    assert "strawberries" in notifier.posted[0][1]
+
+
+def test_a_cycle_of_additions_is_one_message_not_several(notifier):
+    """A bootstrap or a busy morning should not fan out into ten pings."""
+    notifier.added(["milk", "bread", "2 lemons"])
+
+    assert len(notifier.posted) == 1
+    body = notifier.posted[0][1]
+    assert "milk" in body and "bread" in body and "2 lemons" in body
+
+
+def test_activity_is_never_suppressed(notifier):
+    """Unlike a fault, the same item added twice is two real events."""
+    notifier.added(["milk"])
+    notifier.added(["milk"])
+
+    assert len(notifier.posted) == 2
+
+
+def test_nothing_is_posted_for_an_empty_cycle(notifier):
+    notifier.added([])
+
+    assert notifier.posted == []
+
+
+def test_nothing_is_posted_without_a_webhook(notifier):
+    notifier.webhook_url = ""
+
+    notifier.added(["milk"])
+
+    assert notifier.posted == []
+
+
+def test_it_is_marked_low_priority_so_it_does_not_read_as_a_fault(notifier):
+    notifier.added(["milk"])
+
+    headers = notifier.posted[0][2]
+    assert headers["Priority"] == "low"
+    assert headers["Title"] != "voice-to-anylist", "must be distinguishable from an alert"
+
+
+def test_a_failing_webhook_never_reaches_the_sync_loop(notifier, monkeypatch):
+    import httpx
+
+    monkeypatch.setattr(
+        "voice_to_anylist.alerts.httpx.post",
+        lambda url, **kwargs: (_ for _ in ()).throw(httpx.ConnectError("down")),
+    )
+
+    notifier.added(["milk"])  # must not raise

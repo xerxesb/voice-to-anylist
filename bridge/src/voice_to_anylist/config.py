@@ -75,6 +75,14 @@ class Settings(BaseSettings):
         default="",
         description="POSTed a plain-text body when auth fails or the guard trips",
     )
+    activity_webhook_url: str = Field(
+        default="",
+        description=(
+            "POSTed when something new reaches the list. Deliberately separate "
+            "from the alert webhook: a channel that pings for every banana is "
+            "one you stop reading."
+        ),
+    )
     log_level: str = "INFO"
 
     def missing_credentials(self) -> list[str]:

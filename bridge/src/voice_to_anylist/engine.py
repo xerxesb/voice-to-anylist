@@ -173,7 +173,12 @@ class SyncEngine:
                 # "not needed right now".
                 actions.append(
                     Action(
-                        ANYLIST, "check", item_key, item_id=history.id, checked=False
+                        ANYLIST,
+                        "check",
+                        item_key,
+                        item_id=history.id,
+                        name=history.name,
+                        checked=False,
                     )
                 )
                 return _KeyPlan(
@@ -508,3 +513,22 @@ class SyncEngine:
             self.store.set_meta(_BOOTSTRAPPED, "1")
         outcome.applied = True
         return outcome
+
+
+def voice_additions(actions: list[Action]) -> list[str]:
+    """Display names of things a Keep line just put on the active list.
+
+    Two shapes, one event.  Creating a row and reviving a crossed-off one are
+    both "somebody asked for this and it is on the list now" -- and with a
+    catalogue of this size the revive is the common case, so reporting only the
+    former would report almost nothing.
+
+    Deliberately excludes items that became active in the AnyList app: those
+    produce a projection into the note, not an addition to the master.
+    """
+    return [
+        action.name or action.key
+        for action in actions
+        if action.side == ANYLIST
+        and (action.kind == "add" or (action.kind == "check" and not action.checked))
+    ]

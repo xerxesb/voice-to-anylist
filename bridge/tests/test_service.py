@@ -201,3 +201,71 @@ def test_a_configured_service_reports_nothing_missing_on_status(service, keep):
     routes = {r.path: r.endpoint for r in create_app(service).routes if hasattr(r, "endpoint")}
 
     assert routes["/status"]()["unconfigured"] == []
+
+
+# -- announcing what reached the list ----------------------------------------
+
+
+@pytest.fixture
+def announced(service):
+    """Capture what the service would announce, rather than posting it."""
+    names = []
+    service.activity.added = names.extend  # type: ignore[method-assign]
+    return names
+
+
+def test_a_voice_add_is_announced(service, keep, anylist, announced):
+    service.run_cycle()  # bootstrap
+    keep.replace_items([ListItem(id="k9", name="strawberries")])
+
+    service.run_cycle()
+
+    assert announced == ["strawberries"]
+
+
+def test_a_revive_is_announced_too(service, keep, anylist, announced):
+    """With a catalogue this large, a revive is what a voice add usually is."""
+    anylist.replace_items([ListItem(id="a1", name="Ham", checked=True)])
+    service.run_cycle()  # bootstrap
+    keep.replace_items([ListItem(id="k9", name="ham")])
+
+    service.run_cycle()
+
+    assert announced == ["Ham"]
+
+
+def test_an_item_leaving_the_list_is_not_announced(service, keep, anylist, announced):
+    anylist.replace_items([ListItem(id="a1", name="milk")])
+    service.run_cycle()  # bootstrap projects milk into the note
+    announced.clear()
+    keep.replace_items([])  # purchased
+
+    service.run_cycle()
+
+    assert announced == []
+
+
+def test_projecting_the_master_into_the_note_is_not_announced(
+    service, keep, anylist, announced
+):
+    """Only voice adds were asked for; the note catching up is not news."""
+    anylist.replace_items([ListItem(id="a1", name="milk")])
+
+    service.run_cycle()
+
+    assert announced == []
+
+
+def test_a_dry_run_announces_nothing(settings, keep, anylist, store, announced):
+    from voice_to_anylist.service import BridgeService
+
+    dry = BridgeService(
+        settings.model_copy(update={"dry_run": True}), keep=keep, anylist=anylist, store=store
+    )
+    heard = []
+    dry.activity.added = heard.extend  # type: ignore[method-assign]
+    keep.replace_items([ListItem(id="k9", name="strawberries")])
+
+    dry.run_cycle()
+
+    assert heard == [], "nothing happened, so there is nothing to announce"
