@@ -130,6 +130,7 @@ def cmd_sync(args: argparse.Namespace, settings: Settings) -> int:
         anylist,
         store,
         dry_run=dry_run,
+        allow_empty_note=getattr(args, "allow_empty_note", False),
         guard=GuardConfig(
             min_deletes=settings.guard_min_deletes,
             max_ratio=settings.guard_max_ratio,
@@ -148,7 +149,8 @@ def cmd_sync(args: argparse.Namespace, settings: Settings) -> int:
 
     if outcome.guard_tripped:
         print(f"guard tripped: {outcome.guard_reason}")
-        print("Re-run to confirm; the same change twice is treated as deliberate.")
+        if "empty" not in (outcome.guard_reason or ""):
+            print("Re-run to confirm; the same change twice is treated as deliberate.")
         return 2
     if not outcome.actions:
         print("Already in sync; nothing to do.")
@@ -206,6 +208,14 @@ def main(argv: list[str] | None = None) -> int:
 
     sync = sub.add_parser("sync", help="run a single cycle")
     sync.add_argument("--dry-run", action="store_true", help="plan without writing")
+    sync.add_argument(
+        "--allow-empty-note",
+        action="store_true",
+        help=(
+            "accept an empty Keep note as deliberate, marking every active item "
+            "purchased. The service never does this on its own"
+        ),
+    )
     sync.set_defaults(func=cmd_sync)
 
     sub.add_parser("run", help="run the bridge continuously").set_defaults(func=cmd_run)

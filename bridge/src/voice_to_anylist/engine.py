@@ -140,12 +140,16 @@ class SyncEngine:
         *,
         dry_run: bool = False,
         guard: GuardConfig | None = None,
+        allow_empty_note: bool = False,
     ):
         self.keep = keep
         self.anylist = anylist
         self.store = store
         self.dry_run = dry_run
         self.guard = guard or GuardConfig()
+        # Set only by a human running `sync --allow-empty-note`.  The service
+        # never sets it, because an empty note it cannot explain is a fault.
+        self.allow_empty_note = allow_empty_note
 
     # -- planning -----------------------------------------------------------
 
@@ -373,12 +377,34 @@ class SyncEngine:
             remember(None)
             return None
 
+        if self.allow_empty_note and keep_count == 0:
+            # A human ran `sync --allow-empty-note` looking at an empty note.
+            # That is the decision the guard exists to defer to, so it defers
+            # to it whole rather than tripping on the ratio rule instead.
+            log.warning(
+                "guard: an empty note was accepted deliberately; marking %d purchased",
+                len(purchasing),
+            )
+            remember(None)
+            return None
+
         reason: str | None = None
-        if len(shadow) >= self.guard.empty_side_min_shadow and keep_count == 0:
+        # Whether seeing the same change again should be read as confirmation.
+        confirmable = True
+        if (
+            len(shadow) >= self.guard.empty_side_min_shadow
+            and keep_count == 0
+        ):
             reason = (
                 f"the note came back empty while {len(shadow)} items were mapped; "
-                "that would mark every active item purchased"
+                "that would mark every active item purchased. Run "
+                "`vta sync --allow-empty-note` if the note really was emptied"
             )
+            # Never self-confirms.  The note is a projection of the master, so
+            # emptying it is not how anyone expresses "I bought all of it" --
+            # which makes a persistent Keep glitch the far likelier cause, and
+            # it would repeat forever and so confirm itself.
+            confirmable = False
         elif (
             len(purchasing) >= self.guard.min_deletes
             and shadow
@@ -392,6 +418,10 @@ class SyncEngine:
         if reason is None:
             remember(None)
             return None
+
+        if not confirmable:
+            remember(None)
+            return reason
 
         signature = "\n".join(purchasing)
         if self.store.get_meta(_GUARD_SIGNATURE) == signature:

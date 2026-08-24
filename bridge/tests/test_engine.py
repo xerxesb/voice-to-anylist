@@ -262,7 +262,32 @@ def test_an_empty_note_does_not_mark_everything_purchased(engine, keep, anylist,
     assert not any(i.checked for i in anylist.items)
 
 
-def test_the_same_mass_change_twice_is_taken_as_deliberate(engine, keep, anylist, settled):
+def test_an_empty_note_never_confirms_itself_however_long_it_persists(
+    engine, keep, anylist, settled
+):
+    """A note that stays empty is far likelier to be a broken fetch than intent.
+
+    Confirm-on-repeat exists so a genuine purge is not blocked forever, but
+    under this model the note is a projection: emptying it is not how anyone
+    expresses "I bought all of it". A persistent Keep glitch looked identical
+    to that intent and got through on the second cycle.
+    """
+    settled(
+        [item(f"k{i}", f"thing {i}") for i in range(6)],
+        [item(f"a{i}", f"thing {i}") for i in range(6)],
+    )
+    keep.replace_items([])
+
+    for _ in range(5):
+        outcome = engine.run_once()
+        assert outcome.guard_tripped
+
+    assert not any(i.checked for i in anylist.items)
+
+
+def test_an_empty_note_can_be_accepted_deliberately(keep, anylist, store, settled):
+    """The escape hatch: `vta sync --allow-empty-note`, run by a human."""
+    engine = SyncEngine(keep, anylist, store)
     settled(
         [item(f"k{i}", f"thing {i}") for i in range(6)],
         [item(f"a{i}", f"thing {i}") for i in range(6)],
@@ -270,9 +295,27 @@ def test_the_same_mass_change_twice_is_taken_as_deliberate(engine, keep, anylist
     keep.replace_items([])
     engine.run_once()
 
-    engine.run_once()
+    forced = SyncEngine(keep, anylist, store, allow_empty_note=True)
+    forced.run_once()
 
     assert all(i.checked for i in anylist.items)
+
+
+def test_a_partial_mass_change_still_confirms_on_repeat(keep, anylist, store):
+    """Not the empty-note case: the note is answering, it just lost a lot."""
+    engine = SyncEngine(keep, anylist, store, guard=GuardConfig(min_deletes=3))
+    keep.replace_items([item(f"k{i}", f"thing {i}") for i in range(6)])
+    anylist.replace_items([item(f"a{i}", f"thing {i}") for i in range(6)])
+    engine.run_once()  # bootstrap
+    survivor = keep.fetch()[0]
+    keep.replace_items([survivor])
+
+    first = engine.run_once()
+    second = engine.run_once()
+
+    assert first.guard_tripped
+    assert not second.guard_tripped
+    assert sum(1 for i in anylist.items if i.checked) == 5
 
 
 def test_a_dry_run_writes_nothing_and_arms_nothing(keep, anylist, store, settled):
