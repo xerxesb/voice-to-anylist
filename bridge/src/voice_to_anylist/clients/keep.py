@@ -14,10 +14,16 @@ from __future__ import annotations
 
 import json
 import logging
+from http import HTTPStatus
 from pathlib import Path
 
 import gkeepapi
-from gkeepapi.exception import LoginException, ResyncRequiredException, SyncException
+from gkeepapi.exception import (
+    APIException,
+    LoginException,
+    ResyncRequiredException,
+    SyncException,
+)
 from gkeepapi.node import List as KeepList
 from gkeepapi.node import ListItem as KeepListItem
 
@@ -25,6 +31,43 @@ from ..normalise import parse_quantity, render
 from .base import AuthenticationError, ListClientError, ListItem
 
 log = logging.getLogger(__name__)
+
+
+_TOKEN_REJECTED = (
+    "Google rejected the master token. It is revoked whenever the account "
+    "password changes or the device is removed from the account. "
+    "Run `vta bootstrap` for a new one."
+)
+
+# Everything Google is entitled to answer with. Deliberately not the whole
+# KeepException tree: a parse or merge failure is a bug rather than an outage,
+# and belongs in the service's last-resort handler where it gets a stack trace.
+_TRANSLATABLE = (OSError, SyncException, LoginException, APIException)
+
+
+def _translate(error: Exception, doing: str) -> ListClientError:
+    """Map a gkeepapi failure onto the taxonomy the service acts on.
+
+    The distinction decides who gets woken: an AuthenticationError pages
+    immediately, a ListClientError is absorbed until it has happened five times
+    running, and anything else is reported as a bug in this code.
+
+    APIException is the one to watch. It descends from Exception rather than
+    KeepException, so it slips past any `except` reaching for the Keep
+    hierarchy -- which is how a routine Google 5xx came to be announced as an
+    unexpected error, and, worse, how a revoked token would have been too.
+    """
+    if isinstance(error, LoginException):
+        return AuthenticationError(_TOKEN_REJECTED)
+
+    if isinstance(error, APIException):
+        # gkeepapi refreshes the OAuth token twice before surfacing a 401, so
+        # by the time one arrives here the master token really is dead.
+        if error.code == HTTPStatus.UNAUTHORIZED:
+            return AuthenticationError(_TOKEN_REJECTED)
+        return ListClientError(f"Google Keep returned {error.code} while {doing}: {error}")
+
+    return ListClientError(f"Could not reach Google Keep while {doing}: {error}")
 
 
 class KeepNoteNotFound(ListClientError):
@@ -80,14 +123,8 @@ class KeepClient:
         keep = gkeepapi.Keep()
         try:
             keep.authenticate(self.email, self.master_token, state=self._load_state(), sync=True)
-        except LoginException as error:
-            raise AuthenticationError(
-                "Google rejected the master token. It is revoked whenever the account "
-                "password changes or the device is removed from the account. "
-                "Re-run `voice-to-anylist bootstrap`."
-            ) from error
-        except (OSError, SyncException) as error:
-            raise ListClientError(f"Could not reach Google Keep: {error}") from error
+        except _TRANSLATABLE as error:
+            raise _translate(error, "signing in") from error
         self._keep = keep
         return keep
 
@@ -133,12 +170,15 @@ class KeepClient:
     def fetch(self) -> list[ListItem]:
         keep = self._connect()
         try:
-            keep.sync()
-        except ResyncRequiredException:
-            log.warning("Google asked for a full resync; discarding cached state")
-            keep.sync(resync=True)
-        except (OSError, SyncException) as error:
-            raise ListClientError(f"Keep sync failed: {error}") from error
+            # Nested so that a failure of the resync itself is translated too,
+            # rather than escaping from inside the handler untouched.
+            try:
+                keep.sync()
+            except ResyncRequiredException:
+                log.warning("Google asked for a full resync; discarding cached state")
+                keep.sync(resync=True)
+        except _TRANSLATABLE as error:
+            raise _translate(error, "reading the note") from error
 
         self._note = self._resolve_note(keep)
         self._save_state()
@@ -202,6 +242,6 @@ class KeepClient:
             return
         try:
             self._keep.sync()
-        except (OSError, SyncException) as error:
-            raise ListClientError(f"Keep sync failed while saving: {error}") from error
+        except _TRANSLATABLE as error:
+            raise _translate(error, "saving the note") from error
         self._save_state()

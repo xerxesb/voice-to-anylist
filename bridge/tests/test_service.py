@@ -269,3 +269,94 @@ def test_a_dry_run_announces_nothing(settings, keep, anylist, store, announced):
     dry.run_cycle()
 
     assert heard == [], "nothing happened, so there is nothing to announce"
+
+
+# -- how a real Google outage is handled ------------------------------------
+
+
+def _keep_failing_with(error, tmp_path):
+    """A real KeepClient whose connected session fails at sync.
+
+    The point is to exercise the translation in KeepClient rather than a fake
+    that raises the already-classified exception -- the defect being guarded
+    against lived in that translation.
+    """
+    from voice_to_anylist.clients.keep import KeepClient
+
+    class StubKeep:
+        def sync(self, resync=False):
+            raise error
+
+        def dump(self):
+            return {}
+
+    client = KeepClient(
+        email="x@example.com",
+        master_token="aas_et/fake",
+        note_title="Shopping list",
+        state_path=tmp_path / "keep_state.json",
+    )
+    client._keep = StubKeep()
+    return client
+
+
+def test_a_google_outage_does_not_alert_on_the_first_cycle(settings, anylist, store, tmp_path):
+    """The reported incident, end to end.
+
+    Google's auth backend returned 503 and it paged immediately as an
+    unexpected error, bypassing the rule that one blip from an unofficial API
+    is not news.
+    """
+    from gkeepapi.exception import APIException
+
+    error = APIException(503, {"code": 503, "message": "Authentication backend unavailable"})
+    service = BridgeService(
+        settings, keep=_keep_failing_with(error, tmp_path), anylist=anylist, store=store
+    )
+    alerts = []
+    service.alerter.send = lambda key, message: alerts.append((key, message))  # type: ignore[method-assign]
+
+    service.run_cycle()
+
+    assert alerts == [], "a single Google 5xx should be absorbed, not alerted"
+    assert service.status.consecutive_failures == 1
+
+
+def test_a_sustained_google_outage_alerts_as_a_sync_failure_not_a_bug(
+    settings, anylist, store, tmp_path
+):
+    from gkeepapi.exception import APIException
+
+    error = APIException(503, {"code": 503, "message": "Authentication backend unavailable"})
+    service = BridgeService(
+        settings, keep=_keep_failing_with(error, tmp_path), anylist=anylist, store=store
+    )
+    alerts = []
+    service.alerter.send = lambda key, message: alerts.append((key, message))  # type: ignore[method-assign]
+
+    for _ in range(5):
+        service.run_cycle()
+
+    assert [key for key, _ in alerts] == ["sync"], f"expected a sync alert, got {alerts}"
+
+
+def test_a_revoked_token_mid_run_alerts_as_auth_with_the_fix_named(
+    settings, anylist, store, tmp_path
+):
+    """The failure this alerting was built for, and which also escaped.
+
+    It must say how to fix it, not arrive as a generic unexpected error.
+    """
+    from gkeepapi.exception import APIException
+
+    error = APIException(401, {"code": 401, "message": "Unauthorized"})
+    service = BridgeService(
+        settings, keep=_keep_failing_with(error, tmp_path), anylist=anylist, store=store
+    )
+    alerts = []
+    service.alerter.send = lambda key, message: alerts.append((key, message))  # type: ignore[method-assign]
+
+    service.run_cycle()
+
+    assert [key for key, _ in alerts] == ["auth"]
+    assert "bootstrap" in alerts[0][1]
