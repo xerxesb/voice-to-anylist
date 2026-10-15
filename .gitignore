@@ -12,7 +12,16 @@ node_modules/
 
 # Runtime state & secrets
 .env
+# Any other copy of it -- backups, editor swap files -- is just as secret.
+.env.*
+!.env.example
 data/
 *.sqlite
 *.sqlite3
 .anylist_credentials
+
+# Editor droppings. A Vim swap file of .env is a full copy of every secret.
+*.swp
+*.swo
+*~
+.DS_Store
