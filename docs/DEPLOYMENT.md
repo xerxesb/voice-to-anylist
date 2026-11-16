@@ -130,6 +130,56 @@ itself is a crash loop; the reason will be in `vta logs`.
 
 **Nothing since a reboot.** See below.
 
+**AnyList emailed to say syncing is suspended for "downloading an unusually
+large amount of data".** The suspension covers the whole account, official
+apps included, and lifts an hour after it starts. Check the count:
+
+```bash
+vta status    # anylist_downloads.downloads_last_hour, and last_refresh_reason
+```
+
+Steady state is a handful an hour. If it is near `hourly_budget`, something is
+invalidating the copy constantly; `vta logs` shows one `downloaded the AnyList
+account (<reason>; n/40 this hour)` line per download. To stop everything
+while you investigate, remove the agents with `uninstall.sh`. `vta stop` is
+not enough: launchd restarts the jobs straight away.
+
+## AnyList download limits
+
+The `anylist` package cannot read one list. Every read is a POST to
+`data/user-data/get`, which returns the whole account: every list, recipes, the
+meal plan. The sidecar originally did that on every request, about 180 times
+an hour at a 20-second poll, and AnyList suspended the account's syncing over
+it.
+
+Now the sidecar keeps the account in memory and the bridge's polls are
+answered from that copy. Writes update the copy in place. It downloads again
+only when:
+
+| Trigger | `last_refresh_reason` |
+| --- | --- |
+| Nothing in memory (start-up, re-login) | `no-copy` |
+| AnyList's websocket pushed a change, including our own writes' echoes | `push` |
+| A write failed, so the copy may be wrong | `write-failed` |
+| The websocket is down and the copy is over 5 minutes old | `websocket-down` |
+| The copy is over 15 minutes old, in case a push was missed | `max-age` |
+
+Hard limits apply on top of those, whatever the reason:
+
+- at most one download a minute,
+- at most 40 in any rolling hour,
+- after a failed download, nothing reaches AnyList at all, reads or writes,
+  for 1, 2, 4… minutes up to an hour, or longer if AnyList sends `Retry-After`.
+  A 429 on a write does the same.
+
+The limits are recorded in `anylist-downloads.json` in the state directory, so
+a crash loop cannot reset them. When one applies, the sidecar answers 503 with
+`Retry-After` and the bridge waits that long, past its usual backoff ceiling
+if need be.
+
+The thresholds can be changed in `.env`. See the `ANYLIST_*` settings in
+`.env.example`.
+
 ## Known limitation: a user agent needs a login
 
 A LaunchAgent loads when the user session does. The agents carry

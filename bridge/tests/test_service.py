@@ -9,7 +9,12 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from voice_to_anylist.clients.base import AuthenticationError, ListClientError, ListItem
+from voice_to_anylist.clients.base import (
+    AuthenticationError,
+    ListClientError,
+    ListItem,
+    RetryLater,
+)
 from voice_to_anylist.config import Settings
 from voice_to_anylist.service import BridgeService
 
@@ -109,6 +114,52 @@ def test_backoff_grows_while_failing_and_resets_on_success(service, keep):
 
     assert backed_off > baseline
     assert service._delay() < backed_off
+
+
+def test_a_requested_pause_is_obeyed_past_the_backoff_ceiling(service, anylist):
+    """AnyList's suspension lasts an hour; hammering it extends it."""
+    anylist.fail_on_fetch = RetryLater("AnyList throttled", retry_after=3600)
+
+    service.run_cycle()
+
+    assert service._delay() >= 3600
+    assert service.status.as_dict()["retry_after_seconds"] == 3600
+
+
+def test_a_short_pause_never_shortens_the_normal_backoff(service, anylist):
+    anylist.fail_on_fetch = RetryLater("budget spent", retry_after=1)
+
+    service.run_cycle()
+
+    assert service._delay() >= 20 * 2 * 0.85
+
+
+def test_an_absurd_pause_is_capped_at_an_hour(service, anylist):
+    anylist.fail_on_fetch = RetryLater("broken header", retry_after=10**9)
+
+    service.run_cycle()
+
+    assert service._delay() <= 3600 * 1.1
+
+
+def test_the_pause_is_forgotten_after_a_success(service, anylist):
+    anylist.fail_on_fetch = RetryLater("AnyList throttled", retry_after=3600)
+    service.run_cycle()
+
+    anylist.fail_on_fetch = None
+    service.run_cycle()
+
+    assert service._delay() < 60
+    assert service.status.retry_after is None
+
+
+def test_a_pause_is_a_sync_failure_not_a_bug(service, anylist):
+    anylist.fail_on_fetch = RetryLater("AnyList throttled", retry_after=60)
+
+    for _ in range(5):
+        service.run_cycle()
+
+    assert [key for key, _ in service.alerts] == ["sync"]
 
 
 def test_a_guard_trip_is_alerted_and_counted(service, keep, anylist):

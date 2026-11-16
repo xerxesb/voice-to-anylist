@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 
 from .alerts import ActivityNotifier, Alerter
 from .clients.anylist import AnyListClient
-from .clients.base import AuthenticationError, ListClientError
+from .clients.base import AuthenticationError, ListClientError, RetryLater
 from .clients.keep import KeepClient
 from .config import Settings
 from .engine import GuardConfig, SyncEngine, voice_additions
@@ -31,6 +31,10 @@ log = logging.getLogger(__name__)
 # Backoff bounds for a side that is failing.  The ceiling is well under an
 # hour so a transient Google outage recovers on its own overnight.
 MAX_BACKOFF_SECONDS = 600.0
+
+# A side asking to be left alone is obeyed even past the backoff ceiling, up
+# to this.  AnyList's own suspension lasts an hour.
+MAX_RETRY_AFTER_SECONDS = 3600.0
 
 
 @dataclass
@@ -46,6 +50,7 @@ class Status:
     guard_reason: str | None = None
     keep_items: int = 0
     anylist_items: int = 0
+    retry_after: float | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -60,6 +65,7 @@ class Status:
             "guard_reason": self.guard_reason,
             "keep_items": self.keep_items,
             "anylist_items": self.anylist_items,
+            "retry_after_seconds": self.retry_after,
             # Always present so a caller can test one key rather than two
             # shapes; a configured service simply reports nothing missing.
             "unconfigured": [],
@@ -135,6 +141,7 @@ class BridgeService:
         self.status.last_success = datetime.now(UTC)
         self.status.consecutive_failures = 0
         self.status.last_error = None
+        self.status.retry_after = None
         self.alerter.clear("auth")
         self.alerter.clear("sync")
         self.alerter.clear("bug")
@@ -162,6 +169,11 @@ class BridgeService:
         self.status.consecutive_failures += 1
         self.status.last_failure = datetime.now(UTC)
         self.status.last_error = f"{type(error).__name__}: {error}"
+        self.status.retry_after = (
+            min(error.retry_after, MAX_RETRY_AFTER_SECONDS)
+            if isinstance(error, RetryLater)
+            else None
+        )
         log.warning("sync cycle failed (%d in a row): %s", self.status.consecutive_failures, error)
 
     def _delay(self) -> float:
@@ -173,7 +185,11 @@ class BridgeService:
         base = self.settings.poll_interval_seconds
         if self.status.consecutive_failures:
             base = min(base * 2**self.status.consecutive_failures, MAX_BACKOFF_SECONDS)
-        return base * random.uniform(0.85, 1.15)
+        delay = base * random.uniform(0.85, 1.15)
+        if self.status.retry_after is not None:
+            # Never early: jitter only ever pushes a requested wait later.
+            delay = max(delay, self.status.retry_after * random.uniform(1.0, 1.1))
+        return delay
 
     # -- loop ---------------------------------------------------------------
 
@@ -190,6 +206,10 @@ class BridgeService:
             await asyncio.to_thread(self.run_cycle)
             elapsed = time.monotonic() - started
             await asyncio.sleep(max(self._delay() - elapsed, 1.0))
+
+    def anylist_download_stats(self) -> dict | None:
+        stats = getattr(self.anylist, "download_stats", None)
+        return stats() if callable(stats) else None
 
     def close(self) -> None:
         if hasattr(self.anylist, "close"):
@@ -244,6 +264,9 @@ def create_app(service: BridgeService) -> FastAPI:
                 "dry_run": service.settings.dry_run,
             },
             **service.status.as_dict(),
+            # Each download is the whole AnyList account, and too many got its
+            # syncing suspended; this is where to see the count.
+            "anylist_downloads": service.anylist_download_stats(),
         }
 
     return app

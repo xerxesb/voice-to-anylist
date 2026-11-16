@@ -5,10 +5,11 @@
   "description": "Loopback-only REST facade over the unofficial AnyList client",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test 'test/*.test.js'"
   },
   "dependencies": {
-    "anylist": "^0.8.6",
+    "anylist": "0.8.6",
     "express": "^4.19.2"
   },
   "engines": {

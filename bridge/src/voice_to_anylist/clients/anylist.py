@@ -11,7 +11,7 @@ import logging
 import httpx
 
 from ..normalise import key as normalise_key
-from .base import AuthenticationError, ListClientError, ListItem
+from .base import AuthenticationError, ListClientError, ListItem, RetryLater
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +40,12 @@ class AnyListClient:
             raise ListClientError(f"AnyList sidecar unreachable: {error}") from error
         if response.status_code == 401:
             raise AuthenticationError("AnyList sidecar rejected the API token")
+        retry_after = _retry_after(response)
+        if response.status_code in (429, 503) and retry_after is not None:
+            raise RetryLater(
+                f"AnyList {method} {path} deferred for {retry_after:.0f}s: {_error_of(response)}",
+                retry_after,
+            )
         if response.status_code >= 400:
             detail = response.text[:300]
             if response.status_code >= 500 and "auth" in detail.lower():
@@ -99,8 +105,36 @@ class AnyListClient:
     def commit(self) -> None:
         """AnyList writes are applied per request; nothing is batched."""
 
+    def download_stats(self) -> dict | None:
+        """How often the sidecar has downloaded the account, for `vta status`.
+
+        Best-effort: a status page must not fail because the sidecar is down.
+        """
+        try:
+            return dict(self._request("GET", "/stats").json())
+        except (ListClientError, ValueError):
+            return None
+
     def healthy(self) -> bool:
         try:
             return bool(self._request("GET", "/health").json().get("ok"))
         except ListClientError:
             return False
+
+
+def _retry_after(response: httpx.Response) -> float | None:
+    """Retry-After in seconds, if the sidecar sent a usable one."""
+    raw = response.headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        return max(float(raw), 0.0)
+    except ValueError:
+        return None
+
+
+def _error_of(response: httpx.Response) -> str:
+    try:
+        return str(response.json().get("error") or response.text[:300])
+    except ValueError:
+        return response.text[:300]

@@ -135,11 +135,11 @@ def unconfigured_sidecar():
         process.wait(timeout=10)
 
 
-@pytest.fixture(scope="module")
-def sidecar():
+def _serve_healthy(**env):
+    """Run a configured stub sidecar until the test module is done with it."""
     port = _free_port()
     process = _start_sidecar(
-        port, ANYLIST_EMAIL="test@example.com", ANYLIST_PASSWORD="test"
+        port, ANYLIST_EMAIL="test@example.com", ANYLIST_PASSWORD="test", **env
     )
     base_url = f"http://127.0.0.1:{port}"
     try:
@@ -159,5 +159,32 @@ def sidecar():
     finally:
         process.terminate()
         process.wait(timeout=10)
+
+
+@pytest.fixture(scope="module")
+def sidecar():
+    yield from _serve_healthy()
+
+
+@pytest.fixture(scope="module")
+def limited_sidecar():
+    """The sidecar with its production download limits.
+
+    Reset before each test through the stub's control routes, so each test
+    starts with nothing downloaded and the whole budget unspent.
+    """
+    yield from _serve_healthy()
+
+
+@pytest.fixture(scope="module")
+def eager_sidecar():
+    """No floor between downloads, so a push is visible on the very next read.
+
+    The disconnected backstop is zero too, so a dropped websocket shows on the
+    next read instead of five minutes later.
+    """
+    yield from _serve_healthy(
+        ANYLIST_MIN_REFRESH_SECONDS="0", ANYLIST_DISCONNECTED_MAX_AGE_SECONDS="0"
+    )
 
 

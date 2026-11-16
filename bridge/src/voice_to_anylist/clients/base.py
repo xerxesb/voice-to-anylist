@@ -21,6 +21,19 @@ class AuthenticationError(ListClientError):
     """Credentials were rejected.  Needs a human, so it is alerted separately."""
 
 
+class RetryLater(ListClientError):
+    """A side asked not to be called again for a while.
+
+    The AnyList sidecar raises this when its download budget is spent or
+    AnyList itself is pushing back.  Retrying sooner only spends more of a
+    budget whose overrun gets the whole account's syncing suspended.
+    """
+
+    def __init__(self, message: str, retry_after: float):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
 @dataclass(frozen=True)
 class ListItem:
     id: str

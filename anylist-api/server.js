@@ -18,6 +18,8 @@ const path = require('path');
 const express = require('express');
 const AnyList = require('anylist');
 
+const { FetchPolicy, DownloadDeferred, divertPushes, statusOf } = require('./fetch-policy');
+
 /**
  * Where cached credentials live, matching `config.default_state_dir()` on the
  * Python side.  The launchd job sets ANYLIST_CREDENTIALS_FILE explicitly; this
@@ -57,8 +59,38 @@ if (MISSING.length) {
   console.error(`not configured: ${MISSING.join(' and ')} must be set. Serving 503 until then.`);
 }
 
+/** An optional numeric setting in seconds, as milliseconds; unset or junk is the default. */
+function secondsSetting(name) {
+  const raw = process.env[name];
+  if (raw === undefined || raw.trim() === '') return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    console.error(`ignoring ${name}=${raw}: not a number of seconds`);
+    return undefined;
+  }
+  return value * 1000;
+}
+
+function countSetting(name) {
+  const ms = secondsSetting(name);
+  return ms === undefined ? undefined : Math.floor(ms / 1000);
+}
+
+// Every download is the whole account, so how often they happen is the one
+// thing that got this integration's account suspended.  See fetch-policy.js.
+const policy = new FetchPolicy({
+  ledgerFile:
+    process.env.ANYLIST_DOWNLOAD_LEDGER_FILE ||
+    path.join(path.dirname(CREDENTIALS_FILE), 'anylist-downloads.json'),
+  minIntervalMs: secondsSetting('ANYLIST_MIN_REFRESH_SECONDS'),
+  maxAgeMs: secondsSetting('ANYLIST_MAX_AGE_SECONDS'),
+  disconnectedMaxAgeMs: secondsSetting('ANYLIST_DISCONNECTED_MAX_AGE_SECONDS'),
+  hourlyBudget: countSetting('ANYLIST_HOURLY_DOWNLOAD_BUDGET'),
+});
+
 let any = null;
 let loginPromise = null;
+let downloadPromise = null;
 
 /**
  * Log in once and reuse the session.
@@ -74,7 +106,9 @@ function connect() {
       password: PASSWORD,
       credentialsFile: CREDENTIALS_FILE,
     });
+    divertPushes(client, policy);
     await client.login();
+    policy.forget(); // a new client has nothing in memory yet
     any = client;
     return client;
   })().catch((error) => {
@@ -82,6 +116,66 @@ function connect() {
     throw error;
   });
   return loginPromise;
+}
+
+function websocketOpen(client) {
+  return Boolean(client && client.ws && client.ws.readyState === 1);
+}
+
+/**
+ * The package lets its websocket give up after two reconnect attempts, which
+ * would leave the sidecar on its slower disconnected backstop for good.  Nudge
+ * it back each time that backstop fires.
+ */
+function reconnectWebsocket(client) {
+  try {
+    if (client.ws && typeof client.ws.reconnect === 'function') {
+      console.info('AnyList websocket is down; reconnecting');
+      client.ws.reconnect();
+    }
+  } catch (error) {
+    console.error(`websocket reconnect failed: ${error.message || error}`);
+  }
+}
+
+/**
+ * The logged-in client, with the account in memory and as fresh as the
+ * download policy allows.
+ *
+ * Concurrent callers share one in-flight download, so a burst of requests
+ * costs at most one.
+ */
+async function freshClient() {
+  const client = await connect();
+  if (downloadPromise) {
+    await downloadPromise;
+    return client;
+  }
+  const { download, reason } = policy.decide({ connected: websocketOpen(client) });
+  if (!download) return client;
+
+  downloadPromise = (async () => {
+    policy.started();
+    try {
+      await client.download();
+    } catch (error) {
+      policy.failed(error);
+      const deferred = new DownloadDeferred(
+        `AnyList download failed: ${error.message || error}`,
+        policy.cooldownRemainingMs(),
+      );
+      deferred.cause = error;
+      throw deferred;
+    }
+    policy.succeeded(reason);
+    if (reason === 'websocket-down') reconnectWebsocket(client);
+    const { downloads_last_hour: used, hourly_budget: budget } = policy.stats();
+    console.log(`downloaded the AnyList account (${reason}; ${used}/${budget} this hour)`);
+  })().finally(() => {
+    downloadPromise = null;
+  });
+  await downloadPromise;
+  return client;
 }
 
 /** Drop the session so the next call authenticates from scratch. */
@@ -96,14 +190,15 @@ function reset() {
 }
 
 /**
- * Resolve a list by name, refreshing from the server first.
+ * Resolve a list by name from the copy in memory.
  *
- * The bridge polls, so every request wants current state rather than whatever
- * the client cached when it started.
+ * The bridge polls every few seconds, but the copy is only downloaded again
+ * when AnyList says something changed, or the policy's backstops say so.
+ * Writes update the copy in place, so reading back what was just written
+ * needs no download.
  */
 async function getList(name) {
-  const client = await connect();
-  await client.getLists();
+  const client = await freshClient();
   const wanted = String(name || '').trim();
   // getListByName matches exactly; fall back to a case-insensitive search so a
   // config saying "grocery" still finds the list called "Grocery".
@@ -171,10 +266,18 @@ app.get('/health', async (req, res) => {
   }
 });
 
+/** How often the account is being downloaded, and why.  For `vta`. */
+app.get('/stats', (req, res) => {
+  res.json({
+    ...policy.stats(),
+    logged_in: Boolean(any),
+    websocket_open: websocketOpen(any),
+  });
+});
+
 app.get('/lists', async (req, res, next) => {
   try {
-    const client = await connect();
-    await client.getLists();
+    const client = await freshClient();
     res.json({ lists: (client.lists || []).map((l) => l.name) });
   } catch (error) {
     next(error);
@@ -246,14 +349,44 @@ app.delete('/items/:id', async (req, res, next) => {
 });
 
 app.use((error, req, res, next) => {  // eslint-disable-line no-unused-vars
-  const status = error.status || 500;
+  const upstream = error.cause || error;
   const message = String(error.message || error);
+
+  if (error instanceof DownloadDeferred) {
+    const seconds = Math.max(1, Math.ceil(error.retryAfterMs / 1000));
+    res.set('Retry-After', String(seconds));
+    // The failed download's own reason may be an expired session.
+    if (upstream !== error && /auth|login|credential|401|403/i.test(String(upstream.message))) {
+      reset();
+    }
+    console.error(`${req.method} ${req.path} -> 503: ${message} (retry in ${seconds}s)`);
+    return res.status(503).json({ error: message, retry_after_seconds: seconds });
+  }
+
+  if (upstream.response) {
+    // A write AnyList refused leaves the copy unsure of what is really
+    // there.  And a 429 means the account is throttled: stop altogether.
+    policy.invalidate('write-failed');
+    if (statusOf(upstream) === 429) {
+      policy.failed(upstream);
+      const seconds = Math.max(1, Math.ceil(policy.cooldownRemainingMs() / 1000));
+      res.set('Retry-After', String(seconds));
+      console.error(`${req.method} ${req.path} -> 503: AnyList throttled a write (retry in ${seconds}s)`);
+      return res
+        .status(503)
+        .json({ error: `AnyList throttled a write: ${message}`, retry_after_seconds: seconds });
+    }
+  }
+
+  const status = error.status || 500;
   // An auth failure poisons the cached session, so force a fresh login next
-  // time rather than serving 500s until the container is restarted.
+  // time rather than serving 500s until the process is restarted.
   if (status >= 500 && /auth|login|credential|401|403/i.test(message)) reset();
   console.error(`${req.method} ${req.path} -> ${status}: ${message}`);
   res.status(status).json({ error: message });
 });
+
+module.exports = { app, policy };
 
 const server = app.listen(PORT, HOST, () => {
   console.log(`anylist-api listening on ${HOST}:${PORT}`);

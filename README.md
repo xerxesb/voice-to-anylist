@@ -41,6 +41,10 @@ ticking an item off in the AnyList app clears it from the note.
 - **Failure.** A single blip is ignored; a run of them alerts. A mass deletion
   is not propagated until it has been seen twice, so an API returning nothing
   is never read as "the user cleared their list".
+- **AnyList's bandwidth.** Every read of AnyList downloads the whole account,
+  so the sidecar keeps a copy and refreshes it when AnyList pushes a change,
+  under a hard hourly budget that survives restarts. See
+  [AnyList download limits](docs/DEPLOYMENT.md#anylist-download-limits).
 - **Not being set up yet.** A host with no credentials stays up and says so on
   its health endpoint, rather than restart-looping and looking broken.
 

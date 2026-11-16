@@ -32,6 +32,9 @@ jobs:
       - name: Lint
         run: ruff check bridge/
 
+      - name: Test the sidecar
+        run: npm test --prefix anylist-api
+
       # CI=true (set by Actions) makes conftest fail rather than skip if the
       # node side is missing, so the seam is never quietly untested.
       - name: Test
